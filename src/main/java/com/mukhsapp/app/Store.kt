@@ -21,7 +21,7 @@ data class Convo(val peer: String, val last: Msg, val unread: Int)
 
 private const val COLS = "id, uid, mine, body, ts, state"
 
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 2) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 3) {
 
     private fun create(db: SQLiteDatabase) {
         db.execSQL(
@@ -29,7 +29,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 2) {
                 "mine INTEGER, body TEXT, ts INTEGER, sent INTEGER, uid TEXT, " +
                 "state INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, racked INTEGER DEFAULT 1)"
         )
-        db.execSQL("CREATE TABLE peers(hash TEXT PRIMARY KEY, name TEXT, last_seen INTEGER DEFAULT 0)")
+        db.execSQL("CREATE TABLE peers(hash TEXT PRIMARY KEY, name TEXT, last_seen INTEGER DEFAULT 0, about TEXT DEFAULT '')")
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -41,6 +41,8 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 2) {
             db.execSQL("DROP TABLE IF EXISTS msgs")
             db.execSQL("DROP TABLE IF EXISTS peers")
             create(db)
+        } else if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE peers ADD COLUMN about TEXT DEFAULT ''")
         }
     }
 
@@ -232,5 +234,24 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 2) {
         if (c.moveToFirst()) t = c.getLong(0)
         c.close()
         return t
+    }
+
+    fun setAbout(hash: String, about: String) {
+        writableDatabase.execSQL(
+            "UPDATE peers SET about=? WHERE hash=?",
+            arrayOf<Any?>(about, hash)
+        )
+    }
+
+    fun about(hash: String): String {
+        val c = readableDatabase.rawQuery("SELECT about FROM peers WHERE hash=?", arrayOf(hash))
+        var a = ""
+        if (c.moveToFirst()) a = c.getString(0) ?: ""
+        c.close()
+        return a
+    }
+
+    fun clearChat(peer: String) {
+        writableDatabase.execSQL("DELETE FROM msgs WHERE peer=?", arrayOf<Any?>(peer))
     }
 }

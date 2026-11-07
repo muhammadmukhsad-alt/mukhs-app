@@ -2,9 +2,12 @@ package com.mukhsapp.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -13,13 +16,18 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
+import android.view.ViewOutlineProvider
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupWindow
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -36,10 +44,12 @@ class MainActivity : Activity(), NetListener {
 
     private var myName = ""
     private var myNumber = ""
+    private var myAbout = ""
     private var tmpName = ""
     private var tmpNumber = ""
+    private var tmpAbout = ""
 
-    // 0 = splash/setup, 1 = home (tabs), 2 = chat
+    // 0 = splash/setup, 1 = home (tabs), 2 = chat, 3 = settings
     private var screen = 0
     private var tab = 0
     private var currentChat: String? = null
@@ -51,11 +61,11 @@ class MainActivity : Activity(), NetListener {
     private var chatBox: LinearLayout? = null
     private var chatScroll: ScrollView? = null
     private var chatStatusView: TextView? = null
+    private var headerAvatarBox: FrameLayout? = null
     private val tickViews = HashMap<String, TextView>()
     private var lastDayKey = ""
 
     private val tabNames = arrayOf("Chats", "Status", "Nearby", "Communities", "Calls")
-    private val tabIcons = arrayOf("💬", "⭕", "📡", "👥", "📞")
 
     // ---------- lifecycle ----------
 
@@ -64,6 +74,8 @@ class MainActivity : Activity(), NetListener {
         window.statusBarColor = C.FOREST
         window.navigationBarColor = C.FOREST
         L.ha = getSharedPreferences("mukhs", MODE_PRIVATE).getBoolean("ha", true)
+        Sounds.init(this)
+        Notifier.ensureChannel(this)
         store = Store(this)
         net = Net(this, store, this)
         showSplash()
@@ -89,7 +101,7 @@ class MainActivity : Activity(), NetListener {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (screen == 2) {
+        if (screen == 2 || screen == 3) {
             showHome()
         } else {
             super.onBackPressed()
@@ -103,13 +115,17 @@ class MainActivity : Activity(), NetListener {
     }
 
     override fun onIncoming(peer: String, msg: Msg) {
-        if (screen == 2 && currentChat == peer && net.foreground) {
+        if (!net.foreground) {
+            // app is not on screen: show a notification with the message sound
+            Notifier.message(this, net.nameOf(peer), msg.body, peer)
+        } else if (screen == 2 && currentChat == peer) {
+            Sounds.received()
             appendMsg(msg)
-            refreshUi()
         } else {
+            Sounds.received()
             toast("${net.nameOf(peer)}: ${msg.body}")
-            refreshUi()
         }
+        refreshUi()
     }
 
     override fun onOpenChat(peer: String) {
@@ -130,6 +146,11 @@ class MainActivity : Activity(), NetListener {
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
+
+    private fun soon() = toast(L.s("Zai zo nan ba da daɗewa ba.", "Coming soon."))
+
+    private fun defaultAbout(): String =
+        L.s("Ina amfani da MukhsApp", "Hey there! I am using MukhsApp")
 
     // ---------- time helpers ----------
 
@@ -198,7 +219,18 @@ class MainActivity : Activity(), NetListener {
             setPadding(dp(5), dp(1), dp(5), dp(1))
         }
 
-    private fun avatar(name: String, size: Int, online: Boolean): View {
+    // a tappable vector icon
+    private fun icon(res: Int, sizeDp: Int, tint: Int, onClick: (View) -> Unit): ImageView =
+        ImageView(this).apply {
+            setImageResource(res)
+            setColorFilter(tint)
+            setPadding(dp(9), dp(9), dp(9), dp(9))
+            layoutParams = LinearLayout.LayoutParams(dp(sizeDp + 18), dp(sizeDp + 18))
+            setOnClickListener { onClick(it) }
+        }
+
+    // a round picture: the person's photo if we have it, otherwise their first letter
+    private fun avatar(name: String, size: Int, online: Boolean, key: String?): View {
         val fl = FrameLayout(this)
         val palette = intArrayOf(
             Color.parseColor("#2E7D6B"), Color.parseColor("#1B5E4F"),
@@ -206,21 +238,36 @@ class MainActivity : Activity(), NetListener {
             Color.parseColor("#5B8C5A"), Color.parseColor("#4C7A34")
         )
         val bg = palette[(name.hashCode() and 0x7fffffff) % palette.size]
-        val trimmed = name.trim()
-        val initial = if (trimmed.isEmpty()) "?"
-        else String(Character.toChars(trimmed.codePointAt(0))).uppercase()
-        val t = TextView(this).apply {
-            text = initial
-            textSize = size * 0.4f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
+        val bmp = if (key != null) Profile.bitmap(this, key) else null
+        val core: View
+        if (bmp != null) {
+            val iv = ImageView(this)
+            iv.setImageBitmap(bmp)
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP
+            iv.background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(bg)
             }
+            iv.outlineProvider = ViewOutlineProvider.BACKGROUND
+            iv.clipToOutline = true
+            core = iv
+        } else {
+            val trimmed = name.trim()
+            val initial = if (trimmed.isEmpty()) "?"
+            else String(Character.toChars(trimmed.codePointAt(0))).uppercase()
+            val t = TextView(this)
+            t.text = initial
+            t.textSize = size * 0.4f
+            t.typeface = Typeface.DEFAULT_BOLD
+            t.setTextColor(Color.WHITE)
+            t.gravity = Gravity.CENTER
+            t.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(bg)
+            }
+            core = t
         }
-        fl.addView(t, FrameLayout.LayoutParams(dp(size), dp(size)))
+        fl.addView(core, FrameLayout.LayoutParams(dp(size), dp(size)))
         if (online) {
             val dot = View(this).apply {
                 background = GradientDrawable().apply {
@@ -248,6 +295,28 @@ class MainActivity : Activity(), NetListener {
         tv.typeface = Typeface.DEFAULT_BOLD
         setTick(tv, state, onLime)
         return tv
+    }
+
+    // a small panel of choices that opens under a button (like the 3-dot menu)
+    private fun showMenu(anchor: View, items: List<Pair<String, () -> Unit>>) {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = round(C.FOREST, 14)
+            setPadding(0, dp(6), 0, dp(6))
+        }
+        val pw = PopupWindow(box, dp(250), WRAP, true)
+        pw.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        for (item in items) {
+            val row = txt(item.first, 16f, Color.WHITE).apply {
+                setPadding(dp(20), dp(14), dp(20), dp(14))
+                setOnClickListener {
+                    pw.dismiss()
+                    item.second()
+                }
+            }
+            box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+        }
+        pw.showAsDropDown(anchor, 0, 0, Gravity.END)
     }
 
     // ---------- splash (animation + sound) ----------
@@ -353,16 +422,49 @@ class MainActivity : Activity(), NetListener {
     }
 
     private fun applyIdentity() {
+        val p = getSharedPreferences("mukhs", MODE_PRIVATE)
+        myAbout = p.getString("about", "") ?: ""
+        if (myAbout.isBlank()) myAbout = defaultAbout()
         net.myName = myName
+        net.myAbout = myAbout
         net.myHash = Num.hashOf(myNumber)
+    }
+
+    // ---------- photo picking ----------
+
+    private fun pickPhoto() {
+        try {
+            val i = Intent(Intent.ACTION_GET_CONTENT)
+            i.type = "image/*"
+            i.addCategory(Intent.CATEGORY_OPENABLE)
+            startActivityForResult(Intent.createChooser(i, L.s("Zaɓi hoto", "Choose a photo")), 7)
+        } catch (e: Exception) {
+            toast(L.s("Ba a iya buɗe gallery ba.", "Could not open the gallery."))
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != 7 || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        if (Profile.saveFromUri(this, uri, "me")) {
+            net.broadcastProfile()
+            if (screen == 0) showSetup()
+            else if (screen == 3) showSettings()
+        } else {
+            toast(L.s("Ba a iya amfani da wannan hoton ba.", "Could not use that photo."))
+        }
     }
 
     // ---------- setup screen ----------
 
     private fun showSetup() {
         screen = 0
+        val sv = ScrollView(this)
+        sv.setBackgroundColor(C.FOREST)
         val root = col(C.FOREST, 28)
-        root.gravity = Gravity.CENTER_VERTICAL
+        sv.addView(root)
         root.addView(txt(L.s("Barka da zuwa", "Welcome"), 18f, Color.WHITE))
         root.addView(
             txt(L.s("Mu fara da bayananka", "Let's set up your profile"), 28f, C.LIME, true),
@@ -378,12 +480,15 @@ class MainActivity : Activity(), NetListener {
             InputType.TYPE_CLASS_PHONE
         )
         numIn.setText(tmpNumber)
+        val keep = {
+            tmpName = nameIn.text.toString()
+            tmpNumber = numIn.text.toString()
+        }
 
         val setLang = { ha: Boolean ->
             L.ha = ha
             getSharedPreferences("mukhs", MODE_PRIVATE).edit().putBoolean("ha", ha).apply()
-            tmpName = nameIn.text.toString()
-            tmpNumber = numIn.text.toString()
+            keep()
             showSetup()
         }
         val langRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -396,6 +501,22 @@ class MainActivity : Activity(), NetListener {
             LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dp(8) }
         )
         root.addView(langRow, lp(20))
+
+        val av = avatar(if (nameIn.text.isNotEmpty()) nameIn.text.toString() else "?", 96, false, "me")
+        av.setOnClickListener {
+            keep()
+            pickPhoto()
+        }
+        root.addView(av, LinearLayout.LayoutParams(WRAP, WRAP).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            topMargin = dp(20)
+        })
+        root.addView(
+            txt(L.s("Danna don saka hoto (ba dole ba)", "Tap to add a photo (optional)"), 13f, C.MUTED)
+                .apply { gravity = Gravity.CENTER },
+            lp(6)
+        )
+
         root.addView(nameIn, lp(16))
         root.addView(numIn, lp(12))
         root.addView(
@@ -424,7 +545,107 @@ class MainActivity : Activity(), NetListener {
                 showHome()
             }
         }, lp(16))
-        setContentView(root)
+        setContentView(sv)
+    }
+
+    // ---------- settings screen ----------
+
+    private fun showSettings() {
+        screen = 3
+        val sv = ScrollView(this)
+        sv.setBackgroundColor(C.DEEP)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        sv.addView(root)
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(C.FOREST)
+            setPadding(dp(8), dp(10), dp(16), dp(10))
+        }
+        header.addView(icon(R.drawable.ic_arrow_back, 24, C.LIME) { showHome() })
+        header.addView(txt(L.s("Saituna", "Settings"), 20f, C.LIME, true))
+        root.addView(header, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val body = col(C.DEEP, 20)
+        root.addView(body, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val nameIn = styledInput(
+            L.s("Sunanka", "Your name"),
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        )
+        nameIn.setText(if (tmpName.isNotEmpty()) tmpName else myName)
+        val aboutIn = styledInput(L.s("Game da ni", "About"), InputType.TYPE_CLASS_TEXT)
+        aboutIn.setText(if (tmpAbout.isNotEmpty()) tmpAbout else myAbout)
+        val keep = {
+            tmpName = nameIn.text.toString()
+            tmpAbout = aboutIn.text.toString()
+        }
+
+        val av = avatar(myName, 110, false, "me")
+        av.setOnClickListener {
+            keep()
+            pickPhoto()
+        }
+        body.addView(av, LinearLayout.LayoutParams(WRAP, WRAP).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        body.addView(
+            pill(L.s("Canza hoto", "Change photo"), C.FOREST, C.LIME) {
+                keep()
+                pickPhoto()
+            },
+            LinearLayout.LayoutParams(WRAP, WRAP).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = dp(10)
+            }
+        )
+
+        body.addView(txt(L.s("Suna", "Name"), 13f, C.MUTED), lp(20))
+        body.addView(nameIn, lp(6))
+        body.addView(txt(L.s("Game da ni", "About"), 13f, C.MUTED), lp(14))
+        body.addView(aboutIn, lp(6))
+        body.addView(txt(L.s("Lambar waya", "Phone number"), 13f, C.MUTED), lp(14))
+        body.addView(txt("+$myNumber", 18f, Color.WHITE), lp(6))
+
+        body.addView(txt(L.s("Harshe", "Language"), 13f, C.MUTED), lp(18))
+        val setLang = { ha: Boolean ->
+            L.ha = ha
+            getSharedPreferences("mukhs", MODE_PRIVATE).edit().putBoolean("ha", ha).apply()
+            keep()
+            showSettings()
+        }
+        val langRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        langRow.addView(
+            pill("Hausa", if (L.ha) C.LIME else C.FOREST, if (L.ha) C.FOREST else C.LIME) { setLang(true) },
+            LinearLayout.LayoutParams(0, WRAP, 1f)
+        )
+        langRow.addView(
+            pill("English", if (!L.ha) C.LIME else C.FOREST, if (!L.ha) C.FOREST else C.LIME) { setLang(false) },
+            LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dp(8) }
+        )
+        body.addView(langRow, lp(6))
+
+        body.addView(pill(L.s("Ajiye", "Save"), C.LIME, C.FOREST) {
+            val n = nameIn.text.toString().trim().replace("|", " ")
+            var a = aboutIn.text.toString().trim()
+            if (a.isEmpty()) a = defaultAbout()
+            if (n.isEmpty()) {
+                toast(L.s("Rubuta sunanka tukuna", "Please enter your name"))
+            } else {
+                myName = n
+                myAbout = a
+                tmpName = ""
+                tmpAbout = ""
+                getSharedPreferences("mukhs", MODE_PRIVATE).edit()
+                    .putString("name", n).putString("about", a).apply()
+                net.myName = n
+                net.myAbout = a
+                net.restartAdvertising()
+                net.broadcastProfile()
+                toast(L.s("An ajiye.", "Saved."))
+                showHome()
+            }
+        }, lp(24))
+        setContentView(sv)
     }
 
     // ---------- home (tabs) ----------
@@ -441,9 +662,22 @@ class MainActivity : Activity(), NetListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(C.FOREST)
-            setPadding(dp(18), dp(14), dp(18), dp(14))
+            setPadding(dp(18), dp(6), dp(8), dp(6))
         }
         top.addView(txt("MukhsApp", 22f, C.LIME, true), LinearLayout.LayoutParams(0, WRAP, 1f))
+        top.addView(icon(R.drawable.ic_more_vert, 24, Color.WHITE) { v ->
+            showMenu(
+                v,
+                listOf<Pair<String, () -> Unit>>(
+                    Pair(L.s("Sabon group", "New group")) { soon() },
+                    Pair(L.s("Saituna", "Settings")) {
+                        tmpName = ""
+                        tmpAbout = ""
+                        showSettings()
+                    }
+                )
+            )
+        })
         root.addView(top, LinearLayout.LayoutParams(MATCH, WRAP))
         val fc = FrameLayout(this)
         content = fc
@@ -451,7 +685,7 @@ class MainActivity : Activity(), NetListener {
         val nav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(C.FOREST)
-            setPadding(0, dp(6), 0, dp(6))
+            setPadding(0, dp(4), 0, dp(4))
         }
         navBar = nav
         root.addView(nav, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -468,34 +702,33 @@ class MainActivity : Activity(), NetListener {
         renderNav()
     }
 
+    // bottom tabs: text only, like WhatsApp
     private fun renderNav() {
         val nav = navBar ?: return
         nav.removeAllViews()
         val unread = store.totalUnread()
         for (i in 0 until 5) {
             val sel = i == tab
-            val item = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_HORIZONTAL
-                setPadding(0, dp(4), 0, dp(4))
+            val item = FrameLayout(this).apply {
+                setPadding(dp(2), dp(8), dp(2), dp(8))
                 setOnClickListener {
                     tab = i
                     renderTab()
                 }
             }
-            val iconBox = FrameLayout(this)
-            if (sel) iconBox.background = round(C.DEEP, 16)
-            val icon = txt(tabIcons[i], 20f, Color.WHITE)
-            icon.alpha = if (sel) 1f else 0.6f
-            iconBox.addView(icon, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
+            val label = txt(tabNames[i], 10.5f, if (sel) C.LIME else C.MUTED, sel).apply {
+                gravity = Gravity.CENTER
+                maxLines = 1
+                setPadding(dp(4), dp(7), dp(4), dp(7))
+            }
+            if (sel) label.background = round(C.DEEP, 16)
+            item.addView(label, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
             if (i == 0 && unread > 0) {
-                iconBox.addView(
+                item.addView(
                     badge(unread),
                     FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END)
                 )
             }
-            item.addView(iconBox, LinearLayout.LayoutParams(dp(56), dp(30)))
-            item.addView(txt(tabNames[i], 10f, if (sel) C.LIME else C.MUTED, sel))
             nav.addView(item, LinearLayout.LayoutParams(0, WRAP, 1f))
         }
     }
@@ -503,13 +736,12 @@ class MainActivity : Activity(), NetListener {
     private fun placeholder(t: Int): View {
         val box = col(C.DEEP, 24)
         box.gravity = Gravity.CENTER
-        box.addView(txt(tabIcons[t], 48f, Color.WHITE).apply { gravity = Gravity.CENTER })
-        box.addView(txt(tabNames[t], 22f, C.LIME, true).apply { gravity = Gravity.CENTER }, lp(12))
+        box.addView(txt(tabNames[t], 24f, C.LIME, true).apply { gravity = Gravity.CENTER })
         box.addView(
             txt(L.s("Zai zo nan ba da daɗewa ba.", "Coming soon."), 14f, C.MUTED).apply {
                 gravity = Gravity.CENTER
             },
-            lp(6)
+            lp(8)
         )
         return box
     }
@@ -547,7 +779,7 @@ class MainActivity : Activity(), NetListener {
             setPadding(dp(12), dp(10), dp(14), dp(10))
             setOnClickListener { openPeer(h) }
         }
-        row.addView(avatar(name, 48, net.isNearby(h)))
+        row.addView(avatar(name, 48, net.isNearby(h), h))
 
         val mid = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -636,7 +868,7 @@ class MainActivity : Activity(), NetListener {
                 setPadding(dp(12), dp(10), dp(14), dp(10))
                 setOnClickListener { openPeer(h) }
             }
-            row.addView(avatar(name, 48, true))
+            row.addView(avatar(name, 48, true, h))
             val mid = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(12), 0, dp(8), 0)
@@ -686,6 +918,13 @@ class MainActivity : Activity(), NetListener {
     private fun hasPerms(): Boolean =
         requiredPerms().all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
 
+    // the required ones, plus notifications (optional) on new Android versions
+    private fun askForPerms() {
+        val l = requiredPerms().toMutableList()
+        if (Build.VERSION.SDK_INT >= 33) l.add(Manifest.permission.POST_NOTIFICATIONS)
+        requestPermissions(l.toTypedArray(), 1)
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -712,7 +951,7 @@ class MainActivity : Activity(), NetListener {
             net.start()
         } else if (!askedPerms) {
             askedPerms = true
-            requestPermissions(requiredPerms().toTypedArray(), 1)
+            askForPerms()
         }
     }
 
@@ -726,7 +965,7 @@ class MainActivity : Activity(), NetListener {
                 net.loadContacts()
                 net.start()
             } else {
-                requestPermissions(requiredPerms().toTypedArray(), 1)
+                askForPerms()
             }
         }
     }
@@ -743,6 +982,11 @@ class MainActivity : Activity(), NetListener {
     private fun updateChatHeader() {
         val h = currentChat ?: return
         chatStatusView?.text = chatStatusText(h)
+        val hab = headerAvatarBox
+        if (hab != null) {
+            hab.removeAllViews()
+            hab.addView(avatar(net.nameOf(h), 40, net.isNearby(h), h))
+        }
     }
 
     private fun refreshTicks() {
@@ -756,6 +1000,60 @@ class MainActivity : Activity(), NetListener {
         }
     }
 
+    private fun viewContact(h: String) {
+        val msg = StringBuilder()
+        val num = net.contacts[h]?.second
+        if (num != null) msg.append("+").append(num).append("\n\n")
+        val about = store.about(h)
+        if (about.isNotEmpty()) msg.append(about).append("\n\n")
+        msg.append(chatStatusText(h))
+        AlertDialog.Builder(this)
+            .setTitle(net.nameOf(h))
+            .setMessage(msg.toString())
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    private fun confirmClear(h: String) {
+        AlertDialog.Builder(this)
+            .setTitle(L.s("Share tattaunawa?", "Clear chat?"))
+            .setMessage(
+                L.s(
+                    "Za a share duk saƙonnin da ke wannan tattaunawar a wayarka.",
+                    "All messages in this chat will be deleted from your phone."
+                )
+            )
+            .setPositiveButton(L.s("Share", "Clear")) { _, _ ->
+                store.clearChat(h)
+                showChat(h)
+            }
+            .setNegativeButton(L.s("Soke", "Cancel"), null)
+            .show()
+    }
+
+    private fun chatMenu(anchor: View, h: String) {
+        showMenu(
+            anchor,
+            listOf<Pair<String, () -> Unit>>(
+                Pair(L.s("Sabon group", "New group")) { soon() },
+                Pair(L.s("Duba contact", "View contact")) { viewContact(h) },
+                Pair(L.s("Bincika", "Search")) { soon() },
+                Pair(L.s("Hotuna, links da docs", "Media, links, and docs")) { soon() },
+                Pair(L.s("Rufe sanarwa", "Mute notifications")) { soon() },
+                Pair(L.s("Salon chat", "Chat theme")) { soon() },
+                Pair(L.s("Ƙari  ›", "More  ›")) {
+                    showMenu(
+                        anchor,
+                        listOf<Pair<String, () -> Unit>>(
+                            Pair(L.s("Share tattaunawa", "Clear chat")) { confirmClear(h) },
+                            Pair(L.s("Toshe", "Block")) { soon() }
+                        )
+                    )
+                }
+            )
+        )
+    }
+
     private fun showChat(h: String) {
         screen = 2
         currentChat = h
@@ -763,6 +1061,7 @@ class MainActivity : Activity(), NetListener {
         tickViews.clear()
         lastDayKey = ""
         net.markChatRead(h)
+        Notifier.cancel(this, h)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -772,26 +1071,31 @@ class MainActivity : Activity(), NetListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(C.FOREST)
-            setPadding(dp(8), dp(10), dp(16), dp(10))
+            setPadding(dp(4), dp(8), dp(4), dp(8))
         }
-        val back = txt("‹", 34f, C.LIME, true).apply {
-            setPadding(dp(8), 0, dp(12), dp(4))
-            setOnClickListener { showHome() }
-        }
-        header.addView(back)
-        header.addView(avatar(net.nameOf(h), 40, net.isNearby(h)))
+        header.addView(icon(R.drawable.ic_arrow_back, 24, C.LIME) { showHome() })
+        val hab = FrameLayout(this)
+        hab.addView(avatar(net.nameOf(h), 40, net.isNearby(h), h))
+        headerAvatarBox = hab
+        header.addView(hab)
         val titleBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), 0, 0, 0)
+            setPadding(dp(10), 0, dp(4), 0)
         }
         titleBox.addView(txt(net.nameOf(h), 18f, C.LIME, true).apply {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         })
-        val st = txt(chatStatusText(h), 12f, C.MUTED)
+        val st = txt(chatStatusText(h), 12f, C.MUTED).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
         chatStatusView = st
         titleBox.addView(st)
         header.addView(titleBox, LinearLayout.LayoutParams(0, WRAP, 1f))
+        header.addView(icon(R.drawable.ic_videocam, 24, Color.WHITE) { soon() })
+        header.addView(icon(R.drawable.ic_call, 24, Color.WHITE) { soon() })
+        header.addView(icon(R.drawable.ic_more_vert, 24, Color.WHITE) { v -> chatMenu(v, h) })
         root.addView(header, LinearLayout.LayoutParams(MATCH, WRAP))
 
         val cb = LinearLayout(this).apply {
@@ -807,7 +1111,7 @@ class MainActivity : Activity(), NetListener {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setPadding(dp(10), dp(8), dp(10), dp(8))
         }
         val input = EditText(this).apply {
             hint = L.s("Rubuta saƙo", "Type a message")
@@ -819,16 +1123,44 @@ class MainActivity : Activity(), NetListener {
             maxLines = 4
         }
         bar.addView(input, LinearLayout.LayoutParams(0, WRAP, 1f))
+
+        // round button: microphone when the box is empty, send arrow when there is text
+        val actionBtn = FrameLayout(this)
+        actionBtn.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(C.LIME)
+        }
+        val actionIcon = ImageView(this)
+        actionIcon.setColorFilter(C.FOREST)
+        actionIcon.setPadding(dp(13), dp(13), dp(13), dp(13))
+        actionBtn.addView(actionIcon, FrameLayout.LayoutParams(dp(50), dp(50)))
+
+        fun updateAction() {
+            val has = input.text.toString().trim().isNotEmpty()
+            actionIcon.setImageResource(if (has) R.drawable.ic_send else R.drawable.ic_mic)
+        }
+        updateAction()
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                updateAction()
+            }
+        })
+        actionBtn.setOnClickListener {
+            val t = input.text.toString().trim()
+            if (t.isEmpty()) {
+                toast(L.s("Voice note zai zo nan ba da daɗewa ba.", "Voice notes are coming soon."))
+            } else {
+                val m = net.sendText(h, t)
+                Sounds.sent()
+                appendMsg(m)
+                input.setText("")
+            }
+        }
         bar.addView(
-            pill(L.s("Tura", "Send"), C.LIME, C.FOREST) {
-                val t = input.text.toString().trim()
-                if (t.isNotEmpty()) {
-                    val m = net.sendText(h, t)
-                    appendMsg(m)
-                    input.setText("")
-                }
-            },
-            LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(8) }
+            actionBtn,
+            LinearLayout.LayoutParams(dp(50), dp(50)).apply { leftMargin = dp(8) }
         )
         root.addView(bar, LinearLayout.LayoutParams(MATCH, WRAP))
         setContentView(root)

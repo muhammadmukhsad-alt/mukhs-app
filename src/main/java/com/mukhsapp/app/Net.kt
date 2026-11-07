@@ -68,6 +68,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
 
     var myHash = ""
     var myName = ""
+    var myAbout = ""
     var searching = false
     var foreground = true
     var activeChat: String? = null
@@ -164,7 +165,32 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
     // ---------- sending ----------
 
     private fun send(ep: String, j: JSONObject) {
-        client.sendPayload(ep, Payload.fromBytes(j.toString().toByteArray(Charsets.UTF_8)))
+        try {
+            client.sendPayload(ep, Payload.fromBytes(j.toString().toByteArray(Charsets.UTF_8)))
+        } catch (e: Exception) {
+            // too big or connection gone
+        }
+    }
+
+    // my name card: about text and profile picture
+    private fun profileJson(): JSONObject {
+        val j = JSONObject().put("t", "p").put("about", myAbout)
+        j.put("img", Profile.base64(ctx, "me"))
+        return j
+    }
+
+    fun broadcastProfile() {
+        for (ep in connected.keys) send(ep, profileJson())
+    }
+
+    // after my name changes, advertise the new name
+    fun restartAdvertising() {
+        if (!searching) return
+        client.stopAdvertising()
+        client.startAdvertising(
+            advName(), SERVICE_ID, connCallback,
+            AdvertisingOptions.Builder().setStrategy(Strategy.P2P_CLUSTER).build()
+        )
     }
 
     private fun msgJson(uid: String, ts: Long, body: String): JSONObject =
@@ -231,6 +257,11 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
             store.touchSeen(h)
             if (viewing) sendReadAck(ep, listOf(uid))
             ui.onIncoming(h, Msg(rowId, uid, false, body, ts, 0))
+        } else if (type == "p") {
+            store.setAbout(h, j.optString("about"))
+            val img = j.optString("img")
+            if (img.isNotEmpty()) Profile.saveBase64(ctx, h, img)
+            ui.onChanged()
         } else if (type == "d") {
             store.setState(j.optString("id"), 2)
             ui.onChanged()
@@ -305,6 +336,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
                 store.savePeer(h, p.second)
                 store.touchSeen(h)
                 flush(h)
+                send(endpointId, profileJson())
                 if (openAfterConnect == h) {
                     openAfterConnect = null
                     ui.onOpenChat(h)
