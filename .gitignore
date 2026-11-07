@@ -33,3 +33,6 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# Debug signing key (shared so updates install over the old app)
+!debug.keystore

@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,7 +22,16 @@ jobs:
           gradle-version: 8.9
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
+      - name: Name the APK
+        run: cp build/outputs/apk/debug/*.apk MukhsApp.apk
       - uses: actions/upload-artifact@v4
         with:
           name: MukhsApp-APK
-          path: build/outputs/apk/debug/*.apk 
+          path: MukhsApp.apk
+      - name: Publish APK as a release (direct download, no zip)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: MukhsApp build ${{ github.run_number }}
+          files: MukhsApp.apk
+          prerelease: true

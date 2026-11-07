@@ -11,8 +11,19 @@ android {
         applicationId = "com.mukhsapp.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 3
+        versionName = "0.3"
+    }
+
+    // The same debug key is used for every build, so a new APK installs over the old
+    // app without uninstalling it (and chat history is kept).
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     compileOptions {
@@ -26,4 +37,4 @@ android {
 
 dependencies {
     implementation("com.google.android.gms:play-services-nearby:19.1.0")
-} 
+}
