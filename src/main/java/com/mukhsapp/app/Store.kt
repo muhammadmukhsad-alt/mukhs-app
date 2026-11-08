@@ -14,20 +14,25 @@ data class Msg(
     val mine: Boolean,
     val body: String,
     val ts: Long,
-    val state: Int
+    val state: Int,
+    val react: String = "",
+    val star: Boolean = false,
+    val quote: String = "",
+    val qmine: Boolean = false
 )
 
 data class Convo(val peer: String, val last: Msg, val unread: Int)
 
-private const val COLS = "id, uid, mine, body, ts, state"
+private const val COLS = "id, uid, mine, body, ts, state, react, star, quote, qmine"
 
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 4) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 5) {
 
     private fun create(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE msgs(id INTEGER PRIMARY KEY AUTOINCREMENT, peer TEXT, " +
                 "mine INTEGER, body TEXT, ts INTEGER, sent INTEGER, uid TEXT, " +
-                "state INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, racked INTEGER DEFAULT 1, del INTEGER DEFAULT 0)"
+                "state INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, racked INTEGER DEFAULT 1, del INTEGER DEFAULT 0, " +
+                "react TEXT DEFAULT '', star INTEGER DEFAULT 0, quote TEXT DEFAULT '', qmine INTEGER DEFAULT 0)"
         )
         db.execSQL("CREATE TABLE peers(hash TEXT PRIMARY KEY, name TEXT, last_seen INTEGER DEFAULT 0, about TEXT DEFAULT '')")
     }
@@ -44,6 +49,12 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 4) {
         } else {
             if (oldVersion < 3) db.execSQL("ALTER TABLE peers ADD COLUMN about TEXT DEFAULT ''")
             if (oldVersion < 4) db.execSQL("ALTER TABLE msgs ADD COLUMN del INTEGER DEFAULT 0")
+            if (oldVersion < 5) {
+                db.execSQL("ALTER TABLE msgs ADD COLUMN react TEXT DEFAULT ''")
+                db.execSQL("ALTER TABLE msgs ADD COLUMN star INTEGER DEFAULT 0")
+                db.execSQL("ALTER TABLE msgs ADD COLUMN quote TEXT DEFAULT ''")
+                db.execSQL("ALTER TABLE msgs ADD COLUMN qmine INTEGER DEFAULT 0")
+            }
         }
     }
 
@@ -60,12 +71,16 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 4) {
             c.getInt(2) == 1,
             c.getString(3) ?: "",
             c.getLong(4),
-            c.getInt(5)
+            c.getInt(5),
+            c.getString(6) ?: "",
+            c.getInt(7) == 1,
+            c.getString(8) ?: "",
+            c.getInt(9) == 1
         )
 
     // ---------- messages ----------
 
-    fun insertOut(peer: String, uid: String, body: String, ts: Long, state: Int): Long {
+    fun insertOut(peer: String, uid: String, body: String, ts: Long, state: Int, quote: String = "", qmine: Boolean = false): Long {
         val cv = ContentValues()
         cv.put("peer", peer)
         cv.put("mine", 1)
@@ -76,10 +91,12 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 4) {
         cv.put("state", state)
         cv.put("unread", 0)
         cv.put("racked", 1)
+        cv.put("quote", quote)
+        cv.put("qmine", if (qmine) 1 else 0)
         return writableDatabase.insert("msgs", null, cv)
     }
 
-    fun insertIn(peer: String, uid: String, body: String, ts: Long, unread: Boolean): Long {
+    fun insertIn(peer: String, uid: String, body: String, ts: Long, unread: Boolean, quote: String = "", qmine: Boolean = false): Long {
         val cv = ContentValues()
         cv.put("peer", peer)
         cv.put("mine", 0)
@@ -90,6 +107,8 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 4) {
         cv.put("state", 0)
         cv.put("unread", if (unread) 1 else 0)
         cv.put("racked", 1)
+        cv.put("quote", quote)
+        cv.put("qmine", if (qmine) 1 else 0)
         return writableDatabase.insert("msgs", null, cv)
     }
 
@@ -256,6 +275,17 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 4) {
         if (c.moveToFirst()) a = c.getString(0) ?: ""
         c.close()
         return a
+    }
+
+    fun setReact(uid: String, e: String) {
+        if (uid.isEmpty()) return
+        writableDatabase.execSQL("UPDATE msgs SET react=? WHERE uid=?", arrayOf<Any?>(e, uid))
+    }
+
+    fun setStar(ids: List<Long>, star: Boolean) {
+        for (i in ids) {
+            writableDatabase.execSQL("UPDATE msgs SET star=? WHERE id=?", arrayOf<Any?>(if (star) 1 else 0, i))
+        }
     }
 
     fun setDeleted(ids: List<Long>, deleted: Boolean) {

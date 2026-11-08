@@ -65,6 +65,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
     // people I am connected to: endpointId -> hash
     val connected = HashMap<String, String>()
     private val pendingConn = HashMap<String, Pair<String, String>>()
+    private val picBuf = HashMap<String, Array<String?>>()
 
     var myHash = ""
     var myName = ""
@@ -172,15 +173,26 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
         }
     }
 
-    // my name card: about text and profile picture
-    private fun profileJson(): JSONObject {
-        val j = JSONObject().put("t", "p").put("about", myAbout)
-        j.put("img", Profile.base64(ctx, "me"))
-        return j
+    // my name card: about text first, then the picture in small pieces (one message is limited to 32 KB)
+    private fun sendProfile(ep: String) {
+        send(ep, JSONObject().put("t", "p").put("about", myAbout))
+        val img = Profile.base64(ctx, "me")
+        if (img.isEmpty()) return
+        val size = 20000
+        val total = (img.length + size - 1) / size
+        for (i in 0 until total) {
+            val part = img.substring(i * size, minOf(img.length, (i + 1) * size))
+            send(ep, JSONObject().put("t", "pc").put("i", i).put("n", total).put("d", part))
+        }
     }
 
     fun broadcastProfile() {
-        for (ep in connected.keys) send(ep, profileJson())
+        for (ep in connected.keys) sendProfile(ep)
+    }
+
+    fun sendReaction(h: String, uid: String, e: String) {
+        val ep = endpointOfConnected(h) ?: return
+        send(ep, JSONObject().put("t", "x").put("id", uid).put("e", e))
     }
 
     // after my name changes, advertise the new name
@@ -193,8 +205,11 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
         )
     }
 
-    private fun msgJson(uid: String, ts: Long, body: String): JSONObject =
-        JSONObject().put("t", "m").put("id", uid).put("ts", ts).put("b", body)
+    private fun msgJson(uid: String, ts: Long, body: String, quote: String = "", qmine: Boolean = false): JSONObject {
+        val j = JSONObject().put("t", "m").put("id", uid).put("ts", ts).put("b", body)
+        if (quote.isNotEmpty()) j.put("q", quote).put("qw", if (qmine) 1 else 0)
+        return j
+    }
 
     private fun sendReadAck(ep: String, uids: List<String>) {
         val arr = JSONArray()
@@ -202,24 +217,24 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
         send(ep, JSONObject().put("t", "r").put("ids", arr))
     }
 
-    fun sendText(h: String, text: String): Msg {
+    fun sendText(h: String, text: String, quote: String = "", qmine: Boolean = false): Msg {
         val uid = UUID.randomUUID().toString()
         val ts = System.currentTimeMillis()
         val ep = endpointOfConnected(h)
         var state = 0
         if (ep != null) {
-            send(ep, msgJson(uid, ts, text))
+            send(ep, msgJson(uid, ts, text, quote, qmine))
             state = 1
         }
-        val id = store.insertOut(h, uid, text, ts, state)
-        return Msg(id, uid, true, text, ts, state)
+        val id = store.insertOut(h, uid, text, ts, state, quote, qmine)
+        return Msg(id, uid, true, text, ts, state, "", false, quote, qmine)
     }
 
     // when we meet again: send what was waiting, and the "read" receipts that were waiting
     private fun flush(h: String) {
         val ep = endpointOfConnected(h) ?: return
         for (m in store.pendingOut(h)) {
-            send(ep, msgJson(m.uid, m.ts, m.body))
+            send(ep, msgJson(m.uid, m.ts, m.body, m.quote, m.qmine))
             store.setState(m.uid, 1)
         }
         val reads = store.unackedReads(h)
@@ -253,14 +268,33 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
             send(ep, JSONObject().put("t", "d").put("id", uid))
             if (store.hasUid(uid)) return
             val viewing = foreground && activeChat == h
-            val rowId = store.insertIn(h, uid, body, ts, !viewing)
+            val quote = j.optString("q")
+            val qm = j.optInt("qw", 0) == 0
+            val rowId = store.insertIn(h, uid, body, ts, !viewing, quote, qm)
             store.touchSeen(h)
             if (viewing) sendReadAck(ep, listOf(uid))
-            ui.onIncoming(h, Msg(rowId, uid, false, body, ts, 0))
+            ui.onIncoming(h, Msg(rowId, uid, false, body, ts, 0, "", false, quote, qm))
         } else if (type == "p") {
             store.setAbout(h, j.optString("about"))
             val img = j.optString("img")
             if (img.isNotEmpty()) Profile.saveBase64(ctx, h, img)
+            ui.onChanged()
+        } else if (type == "pc") {
+            val i = j.optInt("i")
+            val total = j.optInt("n")
+            if (total in 1..12 && i in 0 until total) {
+                var buf = picBuf[h]
+                if (i == 0 || buf == null || buf.size != total) buf = arrayOfNulls<String>(total)
+                buf[i] = j.optString("d")
+                picBuf[h] = buf
+                if (buf.all { it != null }) {
+                    Profile.saveBase64(ctx, h, buf.joinToString(""))
+                    picBuf.remove(h)
+                    ui.onChanged()
+                }
+            }
+        } else if (type == "x") {
+            store.setReact(j.optString("id"), j.optString("e"))
             ui.onChanged()
         } else if (type == "d") {
             store.setState(j.optString("id"), 2)
@@ -336,7 +370,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
                 store.savePeer(h, p.second)
                 store.touchSeen(h)
                 flush(h)
-                send(endpointId, profileJson())
+                sendProfile(endpointId)
                 if (openAfterConnect == h) {
                     openAfterConnect = null
                     ui.onOpenChat(h)

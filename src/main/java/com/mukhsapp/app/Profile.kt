@@ -58,16 +58,17 @@ object Profile {
 
             val size = minOf(src.width, src.height)
             val sq = Bitmap.createBitmap(src, (src.width - size) / 2, (src.height - size) / 2, size, size)
-            val out = Bitmap.createScaledBitmap(sq, 192, 192, true)
+            val target = minOf(size, 480)
+            val out = if (target == size) sq else Bitmap.createScaledBitmap(sq, target, target, true)
 
-            var q = 70
+            var q = 88
             var bytes = ByteArray(0)
             do {
                 val bos = ByteArrayOutputStream()
                 out.compress(Bitmap.CompressFormat.JPEG, q, bos)
                 bytes = bos.toByteArray()
                 q -= 10
-            } while (bytes.size > 18000 && q > 20)
+            } while (bytes.size > 90000 && q > 30)
 
             file(ctx, key).writeBytes(bytes)
             cache.remove(key)
@@ -86,7 +87,7 @@ object Profile {
     fun saveBase64(ctx: Context, key: String, data: String) {
         try {
             val bytes = Base64.decode(data, Base64.NO_WRAP)
-            if (bytes.isEmpty() || bytes.size > 60000) return
+            if (bytes.isEmpty() || bytes.size > 150000) return
             file(ctx, key).writeBytes(bytes)
             cache.remove(key)
         } catch (e: Exception) {

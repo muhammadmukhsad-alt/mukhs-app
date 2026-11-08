@@ -36,20 +36,33 @@ object C {
     var SELECT = Color.parseColor("#2A7A66")
     var TICK_GREY = Color.parseColor("#9CC3B8")
     var TICK_BLUE = Color.parseColor("#34B7F1")
+    var BAR_TEXT = LIME
+    var BAR_ICON = Color.WHITE
+    var BAR_SUB = MUTED
+    var NAV_SEL = LIME
+    var NAV_UNSEL = MUTED
+    var NAV_PILL = PILL
+    var MINE = LIME
 
     fun apply(d: Boolean) {
         dark = d
         if (d) {
-            BG = DEEP; CARD = FOREST; INPUT = FOREST
+            BG = DEEP; BAR = DEEP; CARD = FOREST; INPUT = FOREST
+            BAR_TEXT = LIME; BAR_ICON = Color.WHITE; BAR_SUB = MUTED
+            NAV_SEL = LIME; NAV_UNSEL = MUTED; NAV_PILL = PILL; MINE = LIME
             TEXT = Color.WHITE; SUB = MUTED; HINT = Color.parseColor("#88FFFFFF")
             ACCENT = LIME; BTN = LIME; ON_BTN = FOREST
-            SELECT = Color.parseColor("#2A7A66")
+            SELECT = Color.parseColor("#552A7A66")
             TICK_GREY = Color.parseColor("#9CC3B8"); TICK_BLUE = Color.parseColor("#34B7F1")
         } else {
-            BG = Color.parseColor("#F2F7F5"); CARD = Color.WHITE; INPUT = Color.parseColor("#E1EBE7")
+            BG = Color.parseColor("#F2F7F5"); BAR = Color.parseColor("#F2F7F5"); CARD = Color.WHITE;
+            BAR_TEXT = FOREST; BAR_ICON = Color.parseColor("#26332F"); BAR_SUB = Color.parseColor("#5B7A71")
+            NAV_SEL = FOREST; NAV_UNSEL = Color.parseColor("#5B6B66"); NAV_PILL = Color.parseColor("#D6F0E3")
+            MINE = Color.parseColor("#DFF7C6")
+             INPUT = Color.parseColor("#E1EBE7")
             TEXT = Color.parseColor("#0B1F1A"); SUB = Color.parseColor("#5B7A71"); HINT = Color.parseColor("#7F938D")
             ACCENT = FOREST; BTN = FOREST; ON_BTN = LIME
-            SELECT = Color.parseColor("#BFE3D6")
+            SELECT = Color.parseColor("#552E9E6B")
             TICK_GREY = Color.parseColor("#7F938D"); TICK_BLUE = Color.parseColor("#0277BD")
         }
     }
