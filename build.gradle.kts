@@ -11,8 +11,8 @@ android {
         applicationId = "com.mukhsapp.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 5
+        versionName = "0.5"
     }
 
     // The same debug key is used for every build, so a new APK installs over the old

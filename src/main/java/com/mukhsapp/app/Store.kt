@@ -21,13 +21,13 @@ data class Convo(val peer: String, val last: Msg, val unread: Int)
 
 private const val COLS = "id, uid, mine, body, ts, state"
 
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 3) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 4) {
 
     private fun create(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE msgs(id INTEGER PRIMARY KEY AUTOINCREMENT, peer TEXT, " +
                 "mine INTEGER, body TEXT, ts INTEGER, sent INTEGER, uid TEXT, " +
-                "state INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, racked INTEGER DEFAULT 1)"
+                "state INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, racked INTEGER DEFAULT 1, del INTEGER DEFAULT 0)"
         )
         db.execSQL("CREATE TABLE peers(hash TEXT PRIMARY KEY, name TEXT, last_seen INTEGER DEFAULT 0, about TEXT DEFAULT '')")
     }
@@ -41,9 +41,16 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 3) {
             db.execSQL("DROP TABLE IF EXISTS msgs")
             db.execSQL("DROP TABLE IF EXISTS peers")
             create(db)
-        } else if (oldVersion < 3) {
-            db.execSQL("ALTER TABLE peers ADD COLUMN about TEXT DEFAULT ''")
+        } else {
+            if (oldVersion < 3) db.execSQL("ALTER TABLE peers ADD COLUMN about TEXT DEFAULT ''")
+            if (oldVersion < 4) db.execSQL("ALTER TABLE msgs ADD COLUMN del INTEGER DEFAULT 0")
         }
+    }
+
+    override fun onOpen(db: SQLiteDatabase) {
+        super.onOpen(db)
+        // messages deleted earlier (after the UNDO time) are removed for good
+        db.execSQL("DELETE FROM msgs WHERE del=1")
     }
 
     private fun readMsg(c: Cursor): Msg =
@@ -105,7 +112,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 3) {
     fun messages(peer: String): List<Msg> {
         val out = ArrayList<Msg>()
         val c = readableDatabase.rawQuery(
-            "SELECT $COLS FROM msgs WHERE peer=? ORDER BY id", arrayOf(peer)
+            "SELECT $COLS FROM msgs WHERE peer=? AND del=0 ORDER BY id", arrayOf(peer)
         )
         while (c.moveToNext()) out.add(readMsg(c))
         c.close()
@@ -115,7 +122,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 3) {
     fun pendingOut(peer: String): List<Msg> {
         val out = ArrayList<Msg>()
         val c = readableDatabase.rawQuery(
-            "SELECT $COLS FROM msgs WHERE peer=? AND mine=1 AND state=0 AND uid IS NOT NULL ORDER BY id",
+            "SELECT $COLS FROM msgs WHERE peer=? AND del=0 AND mine=1 AND state=0 AND uid IS NOT NULL ORDER BY id",
             arrayOf(peer)
         )
         while (c.moveToNext()) out.add(readMsg(c))
@@ -159,7 +166,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 3) {
 
     fun unreadCount(peer: String): Int {
         val c = readableDatabase.rawQuery(
-            "SELECT COUNT(*) FROM msgs WHERE peer=? AND mine=0 AND unread=1", arrayOf(peer)
+            "SELECT COUNT(*) FROM msgs WHERE peer=? AND del=0 AND mine=0 AND unread=1", arrayOf(peer)
         )
         var n = 0
         if (c.moveToFirst()) n = c.getInt(0)
@@ -169,7 +176,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 3) {
 
     fun totalUnread(): Int {
         val c = readableDatabase.rawQuery(
-            "SELECT COUNT(*) FROM msgs WHERE mine=0 AND unread=1", null
+            "SELECT COUNT(*) FROM msgs WHERE del=0 AND mine=0 AND unread=1", null
         )
         var n = 0
         if (c.moveToFirst()) n = c.getInt(0)
@@ -180,7 +187,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 3) {
     fun convos(): List<Convo> {
         val ids = ArrayList<Pair<String, Long>>()
         val c = readableDatabase.rawQuery(
-            "SELECT peer, MAX(id) FROM msgs GROUP BY peer ORDER BY MAX(id) DESC", null
+            "SELECT peer, MAX(id) FROM msgs WHERE del=0 GROUP BY peer ORDER BY MAX(id) DESC", null
         )
         while (c.moveToNext()) ids.add(Pair(c.getString(0) ?: "", c.getLong(1)))
         c.close()
@@ -249,6 +256,12 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 3) {
         if (c.moveToFirst()) a = c.getString(0) ?: ""
         c.close()
         return a
+    }
+
+    fun setDeleted(ids: List<Long>, deleted: Boolean) {
+        for (i in ids) {
+            writableDatabase.execSQL("UPDATE msgs SET del=? WHERE id=?", arrayOf<Any?>(if (deleted) 1 else 0, i))
+        }
     }
 
     fun clearChat(peer: String) {

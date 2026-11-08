@@ -17,15 +17,47 @@ object C {
     val FOREST = Color.parseColor("#004538")
     val DEEP = Color.parseColor("#00221B")
     val MUTED = Color.parseColor("#B8D8CF")
-    val BLUE_ON_DARK = Color.parseColor("#34B7F1")
+    val PILL = Color.parseColor("#0E6A55")
     val BLUE_ON_LIME = Color.parseColor("#0277BD")
-    val GREY_ON_DARK = Color.parseColor("#9CC3B8")
     val GREY_ON_LIME = Color.parseColor("#4F6F66")
+
+    // theme colours: change with light / dark
+    var dark = true
+    var BG = DEEP          // screen background
+    var BAR = FOREST       // top bar and bottom tabs (always deep green)
+    var CARD = FOREST      // rows and received bubbles
+    var INPUT = FOREST     // text boxes
+    var TEXT = Color.WHITE
+    var SUB = MUTED
+    var HINT = Color.parseColor("#88FFFFFF")
+    var ACCENT = LIME      // titles on the background
+    var BTN = LIME
+    var ON_BTN = FOREST
+    var SELECT = Color.parseColor("#2A7A66")
+    var TICK_GREY = Color.parseColor("#9CC3B8")
+    var TICK_BLUE = Color.parseColor("#34B7F1")
+
+    fun apply(d: Boolean) {
+        dark = d
+        if (d) {
+            BG = DEEP; CARD = FOREST; INPUT = FOREST
+            TEXT = Color.WHITE; SUB = MUTED; HINT = Color.parseColor("#88FFFFFF")
+            ACCENT = LIME; BTN = LIME; ON_BTN = FOREST
+            SELECT = Color.parseColor("#2A7A66")
+            TICK_GREY = Color.parseColor("#9CC3B8"); TICK_BLUE = Color.parseColor("#34B7F1")
+        } else {
+            BG = Color.parseColor("#F2F7F5"); CARD = Color.WHITE; INPUT = Color.parseColor("#E1EBE7")
+            TEXT = Color.parseColor("#0B1F1A"); SUB = Color.parseColor("#5B7A71"); HINT = Color.parseColor("#7F938D")
+            ACCENT = FOREST; BTN = FOREST; ON_BTN = LIME
+            SELECT = Color.parseColor("#BFE3D6")
+            TICK_GREY = Color.parseColor("#7F938D"); TICK_BLUE = Color.parseColor("#0277BD")
+        }
+    }
 }
 
-// Hausa / English text. Default is Hausa; the user picks the language on the setup screen.
+// Hausa / English text. Default is English; the language is changed in Settings.
 object L {
-    var ha = true
+    var ha = false
     fun s(hausa: String, english: String): String = if (ha) hausa else english
 }
 
