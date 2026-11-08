@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.provider.ContactsContract
+import android.util.Base64
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.AdvertisingOptions
 import com.google.android.gms.nearby.connection.ConnectionInfo
@@ -19,6 +20,7 @@ import com.google.android.gms.nearby.connection.PayloadTransferUpdate
 import com.google.android.gms.nearby.connection.Strategy
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -66,6 +68,8 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
     val connected = HashMap<String, String>()
     private val pendingConn = HashMap<String, Pair<String, String>>()
     private val picBuf = HashMap<String, Array<String?>>()
+    private val mediaMeta = HashMap<String, JSONObject>()
+    private val mediaParts = HashMap<String, Array<String?>>()
 
     var myHash = ""
     var myName = ""
@@ -190,6 +194,66 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
         for (ep in connected.keys) sendProfile(ep)
     }
 
+    // a photo, voice note or document: a small header, then the file in pieces
+    private fun sendMediaOut(ep: String, uid: String, ts: Long, kind: String, path: String, name: String, dur: Int) {
+        val f = File(path)
+        if (!f.exists()) return
+        val b64 = Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)
+        val size = 20000
+        val total = (b64.length + size - 1) / size
+        send(
+            ep,
+            JSONObject().put("t", "f").put("id", uid).put("ts", ts).put("k", kind)
+                .put("n", name).put("dur", dur).put("c", total)
+        )
+        for (i in 0 until total) {
+            val part = b64.substring(i * size, minOf(b64.length, (i + 1) * size))
+            send(ep, JSONObject().put("t", "fc").put("id", uid).put("i", i).put("c", total).put("d", part))
+        }
+    }
+
+    fun sendMedia(h: String, kind: String, path: String, name: String, dur: Int): Msg {
+        val uid = UUID.randomUUID().toString()
+        val ts = System.currentTimeMillis()
+        val ep = endpointOfConnected(h)
+        var state = 0
+        if (ep != null) {
+            sendMediaOut(ep, uid, ts, kind, path, name, dur)
+            state = 1
+        }
+        val id = store.insertOut(h, uid, name, ts, state, "", false, kind, path, dur)
+        return Msg(id, uid, true, name, ts, state, "", false, "", false, kind, path, dur)
+    }
+
+    private fun checkMedia(h: String, ep: String, uid: String) {
+        val meta = mediaMeta[uid] ?: return
+        val parts = mediaParts[uid] ?: return
+        val total = meta.optInt("c")
+        if (parts.size != total || parts.any { it == null }) return
+        mediaMeta.remove(uid)
+        mediaParts.remove(uid)
+        send(ep, JSONObject().put("t", "d").put("id", uid))
+        if (store.hasUid(uid)) return
+        try {
+            val kind = meta.optString("k")
+            val name = meta.optString("n")
+            val ext0 = if (kind == "a") "m4a" else if (kind == "i") "jpg" else name.substringAfterLast('.', "bin")
+            var ext = ext0.filter { it.isLetterOrDigit() }.take(8)
+            if (ext.isEmpty()) ext = "bin"
+            val f = File(Media.dir(ctx), "in_" + uid + "." + ext)
+            f.writeBytes(Base64.decode(parts.joinToString(""), Base64.NO_WRAP))
+            val ts = meta.optLong("ts", System.currentTimeMillis())
+            val dur = meta.optInt("dur")
+            val viewing = foreground && activeChat == h
+            val rowId = store.insertIn(h, uid, name, ts, !viewing, "", false, kind, f.path, dur)
+            store.touchSeen(h)
+            if (viewing) sendReadAck(ep, listOf(uid))
+            ui.onIncoming(h, Msg(rowId, uid, false, name, ts, 0, "", false, "", false, kind, f.path, dur))
+        } catch (e: Exception) {
+            // ignore a broken file
+        }
+    }
+
     fun sendReaction(h: String, uid: String, e: String) {
         val ep = endpointOfConnected(h) ?: return
         send(ep, JSONObject().put("t", "x").put("id", uid).put("e", e))
@@ -234,7 +298,8 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
     private fun flush(h: String) {
         val ep = endpointOfConnected(h) ?: return
         for (m in store.pendingOut(h)) {
-            send(ep, msgJson(m.uid, m.ts, m.body, m.quote, m.qmine))
+            if (m.kind == "t") send(ep, msgJson(m.uid, m.ts, m.body, m.quote, m.qmine))
+            else sendMediaOut(ep, m.uid, m.ts, m.kind, m.path, m.body, m.dur)
             store.setState(m.uid, 1)
         }
         val reads = store.unackedReads(h)
@@ -292,6 +357,26 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
                     picBuf.remove(h)
                     ui.onChanged()
                 }
+            }
+        } else if (type == "f") {
+            val uid = j.optString("id")
+            val c = j.optInt("c")
+            if (uid.isNotEmpty() && c in 1..80) {
+                mediaMeta[uid] = j
+                checkMedia(h, ep, uid)
+            }
+        } else if (type == "fc") {
+            val uid = j.optString("id")
+            val i = j.optInt("i")
+            val c = j.optInt("c")
+            if (uid.isNotEmpty() && c in 1..80 && i in 0 until c) {
+                var buf: Array<String?>? = mediaParts[uid]
+                if (buf == null || buf.size != c) {
+                    buf = arrayOfNulls<String>(c)
+                    mediaParts[uid] = buf
+                }
+                buf[i] = j.optString("d")
+                checkMedia(h, ep, uid)
             }
         } else if (type == "x") {
             store.setReact(j.optString("id"), j.optString("e"))

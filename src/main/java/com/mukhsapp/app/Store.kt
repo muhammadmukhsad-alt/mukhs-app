@@ -18,21 +18,25 @@ data class Msg(
     val react: String = "",
     val star: Boolean = false,
     val quote: String = "",
-    val qmine: Boolean = false
+    val qmine: Boolean = false,
+    val kind: String = "t",
+    val path: String = "",
+    val dur: Int = 0
 )
 
 data class Convo(val peer: String, val last: Msg, val unread: Int)
 
-private const val COLS = "id, uid, mine, body, ts, state, react, star, quote, qmine"
+private const val COLS = "id, uid, mine, body, ts, state, react, star, quote, qmine, kind, path, dur"
 
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 5) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 6) {
 
     private fun create(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE msgs(id INTEGER PRIMARY KEY AUTOINCREMENT, peer TEXT, " +
                 "mine INTEGER, body TEXT, ts INTEGER, sent INTEGER, uid TEXT, " +
                 "state INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, racked INTEGER DEFAULT 1, del INTEGER DEFAULT 0, " +
-                "react TEXT DEFAULT '', star INTEGER DEFAULT 0, quote TEXT DEFAULT '', qmine INTEGER DEFAULT 0)"
+                "react TEXT DEFAULT '', star INTEGER DEFAULT 0, quote TEXT DEFAULT '', qmine INTEGER DEFAULT 0, " +
+                "kind TEXT DEFAULT 't', path TEXT DEFAULT '', dur INTEGER DEFAULT 0)"
         )
         db.execSQL("CREATE TABLE peers(hash TEXT PRIMARY KEY, name TEXT, last_seen INTEGER DEFAULT 0, about TEXT DEFAULT '')")
     }
@@ -55,6 +59,11 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 5) {
                 db.execSQL("ALTER TABLE msgs ADD COLUMN quote TEXT DEFAULT ''")
                 db.execSQL("ALTER TABLE msgs ADD COLUMN qmine INTEGER DEFAULT 0")
             }
+            if (oldVersion < 6) {
+                db.execSQL("ALTER TABLE msgs ADD COLUMN kind TEXT DEFAULT 't'")
+                db.execSQL("ALTER TABLE msgs ADD COLUMN path TEXT DEFAULT ''")
+                db.execSQL("ALTER TABLE msgs ADD COLUMN dur INTEGER DEFAULT 0")
+            }
         }
     }
 
@@ -75,12 +84,15 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 5) {
             c.getString(6) ?: "",
             c.getInt(7) == 1,
             c.getString(8) ?: "",
-            c.getInt(9) == 1
+            c.getInt(9) == 1,
+            c.getString(10) ?: "t",
+            c.getString(11) ?: "",
+            c.getInt(12)
         )
 
     // ---------- messages ----------
 
-    fun insertOut(peer: String, uid: String, body: String, ts: Long, state: Int, quote: String = "", qmine: Boolean = false): Long {
+    fun insertOut(peer: String, uid: String, body: String, ts: Long, state: Int, quote: String = "", qmine: Boolean = false, kind: String = "t", path: String = "", dur: Int = 0): Long {
         val cv = ContentValues()
         cv.put("peer", peer)
         cv.put("mine", 1)
@@ -93,10 +105,13 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 5) {
         cv.put("racked", 1)
         cv.put("quote", quote)
         cv.put("qmine", if (qmine) 1 else 0)
+        cv.put("kind", kind)
+        cv.put("path", path)
+        cv.put("dur", dur)
         return writableDatabase.insert("msgs", null, cv)
     }
 
-    fun insertIn(peer: String, uid: String, body: String, ts: Long, unread: Boolean, quote: String = "", qmine: Boolean = false): Long {
+    fun insertIn(peer: String, uid: String, body: String, ts: Long, unread: Boolean, quote: String = "", qmine: Boolean = false, kind: String = "t", path: String = "", dur: Int = 0): Long {
         val cv = ContentValues()
         cv.put("peer", peer)
         cv.put("mine", 0)
@@ -109,6 +124,9 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 5) {
         cv.put("racked", 1)
         cv.put("quote", quote)
         cv.put("qmine", if (qmine) 1 else 0)
+        cv.put("kind", kind)
+        cv.put("path", path)
+        cv.put("dur", dur)
         return writableDatabase.insert("msgs", null, cv)
     }
 

@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
 import android.content.ClipData
+import android.content.ContentValues
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -17,10 +18,18 @@ import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.media.MediaPlayer
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.net.Uri
+import android.provider.MediaStore
+import android.view.inputmethod.InputMethodManager
+import android.webkit.MimeTypeMap
+import android.widget.ProgressBar
+import java.io.File
 import android.provider.ContactsContract
 import android.text.Editable
 import android.text.InputType
@@ -90,6 +99,37 @@ class MainActivity : Activity(), NetListener {
     private var reactBar: LinearLayout? = null
     private var selReply: View? = null
     private var forwardTexts: List<String>? = null
+    private var chatInput: EditText? = null
+    private var emojiPanel: View? = null
+    private var inputBoxView: View? = null
+    private var recRowView: View? = null
+    private var recTimer: TextView? = null
+    private var recHint: TextView? = null
+    private var recorder: MediaRecorder? = null
+    private var recFile: File? = null
+    private var recStart = 0L
+    private var recCancel = false
+    private var recDownX = 0f
+    private var camUri: Uri? = null
+    private var player: MediaPlayer? = null
+    private var playingUid = ""
+    private var playIconView: ImageView? = null
+    private var playBarView: ProgressBar? = null
+    private val recTick = object : Runnable {
+        override fun run() {
+            recTimer?.text = Media.fmtDur(((System.currentTimeMillis() - recStart) / 1000).toInt())
+            handler.postDelayed(this, 400)
+        }
+    }
+    private val playTick = object : Runnable {
+        override fun run() {
+            val p = player
+            if (p != null && p.isPlaying) {
+                playBarView?.progress = p.currentPosition
+                handler.postDelayed(this, 150)
+            }
+        }
+    }
     private var downX = 0f
     private var downY = 0f
     private val msgById = HashMap<Long, Msg>()
@@ -119,6 +159,8 @@ class MainActivity : Activity(), NetListener {
     override fun onPause() {
         super.onPause()
         net.foreground = false
+        if (recorder != null) finishRecording(false)
+        stopPlay()
     }
 
     override fun onResume() {
@@ -239,13 +281,13 @@ class MainActivity : Activity(), NetListener {
     override fun onIncoming(peer: String, msg: Msg) {
         val muted = getSet("muted").contains(peer)
         if (!net.foreground) {
-            if (!muted) Notifier.message(this, net.nameOf(peer), msg.body, peer)
+            if (!muted) Notifier.message(this, net.nameOf(peer), previewOf(msg), peer)
         } else if (screen == 2 && currentChat == peer) {
             if (!muted) Sounds.received()
             appendMsg(msg)
         } else if (!muted) {
             Sounds.received()
-            toast("${net.nameOf(peer)}: ${msg.body}")
+            toast("${net.nameOf(peer)}: ${previewOf(msg)}")
         }
         refreshUi()
     }
@@ -478,6 +520,24 @@ class MainActivity : Activity(), NetListener {
             adjustViewBounds = true
         }
         root.addView(logo, FrameLayout.LayoutParams(dp(280), dp(280), Gravity.CENTER))
+        val fromBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        fromBox.addView(txt("from", 14f, C.MUTED).apply { gravity = Gravity.CENTER })
+        fromBox.addView(
+            txt("MUKHSAD", 20f, C.LIME, true).apply {
+                gravity = Gravity.CENTER
+                letterSpacing = 0.18f
+            },
+            LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(2) }
+        )
+        root.addView(
+            fromBox,
+            FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                bottomMargin = dp(52)
+            }
+        )
         setContentView(root)
 
         logo.alpha = 0f
@@ -567,6 +627,32 @@ class MainActivity : Activity(), NetListener {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 11 && resultCode == RESULT_OK) {
+            val u = data?.data
+            if (u != null) sendImageUri(u)
+            return
+        }
+        if (requestCode == 12) {
+            val u = camUri
+            camUri = null
+            if (u != null) {
+                if (resultCode == RESULT_OK) {
+                    sendImageUri(u)
+                } else {
+                    try {
+                        contentResolver.delete(u, null, null)
+                    } catch (e: Exception) {
+                        // ignore
+                    }
+                }
+            }
+            return
+        }
+        if (requestCode == 13 && resultCode == RESULT_OK) {
+            val u = data?.data
+            if (u != null) sendDocUri(u)
+            return
+        }
         if (requestCode != 7 || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         if (Profile.saveFromUri(this, uri, "me")) {
@@ -1044,7 +1130,7 @@ class MainActivity : Activity(), NetListener {
         var list = store.convos()
         if (q.isNotEmpty()) {
             list = list.filter {
-                net.nameOf(it.peer).lowercase().contains(q) || it.last.body.lowercase().contains(q)
+                net.nameOf(it.peer).lowercase().contains(q) || previewOf(it.last).lowercase().contains(q)
             }
         }
         list = list.sortedByDescending { pins.contains(it.peer) }
@@ -1110,7 +1196,7 @@ class MainActivity : Activity(), NetListener {
             sub.addView(tk)
         }
         sub.addView(
-            txt(cv.last.body, 14f, C.SUB).apply {
+            txt(previewOf(cv.last), 14f, C.SUB).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
@@ -1545,6 +1631,10 @@ class MainActivity : Activity(), NetListener {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 2) {
+            toast(L.s("Yanzu riƙe mic ɗin don yin rikodi.", "Now hold the mic button to record."))
+            return
+        }
         if (hasPerms()) {
             net.loadContacts()
             net.start()
@@ -1731,7 +1821,7 @@ class MainActivity : Activity(), NetListener {
     }
 
     private fun snippet(m: Msg): String =
-        if (m.body.length > 120) m.body.substring(0, 120) + "…" else m.body
+        previewOf(m).let { if (it.length > 120) it.substring(0, 120) + "…" else it }
 
     private fun startReply() {
         val id = selected.firstOrNull() ?: return
@@ -1780,9 +1870,12 @@ class MainActivity : Activity(), NetListener {
         val texts = ArrayList<String>()
         for (id in ids) {
             val m = msgById[id] ?: continue
-            texts.add(m.body)
+            if (m.kind == "t") texts.add(m.body)
         }
-        if (texts.isEmpty()) return
+        if (texts.isEmpty()) {
+            toast(L.s("Rubutu kaɗai za a iya turawa yanzu.", "Only text can be forwarded for now."))
+            return
+        }
         clearSelection()
         forwardTexts = texts
         showContacts()
@@ -1793,6 +1886,7 @@ class MainActivity : Activity(), NetListener {
         val sb = StringBuilder()
         for (id in ids) {
             val m = msgById[id] ?: continue
+            if (m.kind != "t") continue
             if (sb.isNotEmpty()) sb.append("\n")
             sb.append(m.body)
         }
@@ -1841,6 +1935,7 @@ class MainActivity : Activity(), NetListener {
         screen = 2
         currentChat = h
         net.activeChat = h
+        stopPlay()
         clearChatState()
         replyTo = null
         lastDayKey = ""
@@ -1969,18 +2064,56 @@ class MainActivity : Activity(), NetListener {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(8), dp(10), dp(8))
         }
+        val inputBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = round(C.INPUT, 24)
+        }
+        inputBox.addView(icon(R.drawable.ic_emoji, 22, C.SUB) { toggleEmoji() })
         val input = EditText(this).apply {
-            hint = L.s("Rubuta saƙo", "Type a message")
+            hint = L.s("Rubuta saƙo", "Message")
             setHintTextColor(C.HINT)
             setTextColor(C.TEXT)
-            background = round(C.INPUT, 24)
-            setPadding(dp(16), dp(10), dp(16), dp(10))
+            background = null
+            setPadding(dp(4), dp(10), dp(4), dp(10))
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
             maxLines = 4
         }
-        bar.addView(input, LinearLayout.LayoutParams(0, WRAP, 1f))
+        chatInput = input
+        input.setOnClickListener { emojiPanel?.visibility = View.GONE }
+        inputBox.addView(input, LinearLayout.LayoutParams(0, WRAP, 1f))
+        inputBox.addView(icon(R.drawable.ic_attach, 22, C.SUB) { showAttachSheet() })
+        val camBtn = icon(R.drawable.ic_camera, 22, C.SUB) { takePhoto() }
+        inputBox.addView(camBtn)
+        bar.addView(inputBox, LinearLayout.LayoutParams(0, WRAP, 1f))
+        inputBoxView = inputBox
 
-        // round button: microphone when the box is empty, send arrow when there is text
+        // shown while a voice note is being recorded
+        val recRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = round(C.INPUT, 24)
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            visibility = View.GONE
+        }
+        val redDot = View(this)
+        redDot.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.parseColor("#E53935"))
+        }
+        recRow.addView(redDot, LinearLayout.LayoutParams(dp(10), dp(10)))
+        val rtimer = txt("0:00", 16f, C.TEXT).apply { setPadding(dp(10), 0, 0, 0) }
+        recTimer = rtimer
+        recRow.addView(rtimer)
+        val rhint = txt(L.s("‹ Zare hagu don soke", "‹ Slide left to cancel"), 14f, C.SUB).apply {
+            gravity = Gravity.END
+        }
+        recHint = rhint
+        recRow.addView(rhint, LinearLayout.LayoutParams(0, WRAP, 1f))
+        recRowView = recRow
+        bar.addView(recRow, LinearLayout.LayoutParams(0, WRAP, 1f))
+
+        // round button: microphone when the box is empty (hold to record), send arrow when there is text
         val actionBtn = FrameLayout(this)
         actionBtn.background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
@@ -1994,6 +2127,7 @@ class MainActivity : Activity(), NetListener {
         fun updateAction() {
             val has = input.text.toString().trim().isNotEmpty()
             actionIcon.setImageResource(if (has) R.drawable.ic_send else R.drawable.ic_mic)
+            camBtn.visibility = if (has) View.GONE else View.VISIBLE
         }
         updateAction()
         input.addTextChangedListener(object : TextWatcher {
@@ -2003,24 +2137,49 @@ class MainActivity : Activity(), NetListener {
                 updateAction()
             }
         })
-        actionBtn.setOnClickListener {
+
+        fun sendTyped() {
             val t = input.text.toString().trim()
-            if (t.isEmpty()) {
-                toast(L.s("Voice note zai zo nan ba da daɗewa ba.", "Voice notes are coming soon."))
-            } else {
-                val rep = replyTo
-                val m = if (rep != null) net.sendText(h, t, snippet(rep), rep.mine) else net.sendText(h, t)
-                cancelReply()
-                Sounds.sent()
-                appendMsg(m)
-                input.setText("")
-            }
+            if (t.isEmpty()) return
+            val rep = replyTo
+            val m = if (rep != null) net.sendText(h, t, snippet(rep), rep.mine) else net.sendText(h, t)
+            cancelReply()
+            Sounds.sent()
+            appendMsg(m)
+            input.setText("")
         }
+
+        fun handleTouch(ev: MotionEvent): Boolean {
+            val has = input.text.toString().trim().isNotEmpty()
+            if (has) {
+                if (ev.action == MotionEvent.ACTION_UP) sendTyped()
+                return true
+            }
+            if (ev.action == MotionEvent.ACTION_DOWN) {
+                if (startRecording()) {
+                    recCancel = false
+                    recDownX = ev.rawX
+                }
+            } else if (ev.action == MotionEvent.ACTION_MOVE) {
+                if (recorder != null) {
+                    recCancel = recDownX - ev.rawX > dp(110)
+                    recHint?.text = if (recCancel) L.s("Saki don soke", "Release to cancel")
+                    else L.s("‹ Zare hagu don soke", "‹ Slide left to cancel")
+                }
+            } else if (ev.action == MotionEvent.ACTION_UP || ev.action == MotionEvent.ACTION_CANCEL) {
+                if (recorder != null) finishRecording(ev.action == MotionEvent.ACTION_UP && !recCancel)
+            }
+            return true
+        }
+        actionBtn.setOnTouchListener { _, ev -> handleTouch(ev) }
         bar.addView(
             actionBtn,
             LinearLayout.LayoutParams(dp(50), dp(50)).apply { leftMargin = dp(8) }
         )
         root.addView(bar, LinearLayout.LayoutParams(MATCH, WRAP))
+        val ep = buildEmojiPanel()
+        emojiPanel = ep
+        root.addView(ep, LinearLayout.LayoutParams(MATCH, dp(250)))
 
         // quick reactions, shown above a selected message
         val rbar = LinearLayout(this).apply {
@@ -2062,6 +2221,407 @@ class MainActivity : Activity(), NetListener {
                     "Not connected. Messages you write will be sent when you meet."
                 )
             )
+        }
+    }
+
+    // ----- what a message looks like in lists and replies -----
+
+    private fun previewOf(m: Msg): String =
+        if (m.kind == "a") L.s("Saƙon murya", "Voice message") + " (" + Media.fmtDur(m.dur) + ")"
+        else if (m.kind == "i") L.s("Hoto", "Photo")
+        else m.body
+
+    // ----- voice notes -----
+
+    private fun startRecording(): Boolean {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 2)
+            return false
+        }
+        stopPlay()
+        try {
+            val f = File(Media.dir(this), "rec_" + System.currentTimeMillis() + ".m4a")
+            val r = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
+            r.setAudioSource(MediaRecorder.AudioSource.MIC)
+            r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            r.setAudioSamplingRate(16000)
+            r.setAudioEncodingBitRate(24000)
+            r.setAudioChannels(1)
+            r.setMaxDuration(180000)
+            r.setOutputFile(f.path)
+            r.prepare()
+            r.start()
+            recorder = r
+            recFile = f
+            recStart = System.currentTimeMillis()
+            showRecUi(true)
+            return true
+        } catch (e: Exception) {
+            recorder = null
+            toast(L.s("Ba a iya fara rikodi ba.", "Could not start recording."))
+            return false
+        }
+    }
+
+    private fun showRecUi(on: Boolean) {
+        inputBoxView?.visibility = if (on) View.GONE else View.VISIBLE
+        recRowView?.visibility = if (on) View.VISIBLE else View.GONE
+        handler.removeCallbacks(recTick)
+        if (on) {
+            recTimer?.text = "0:00"
+            handler.post(recTick)
+        }
+    }
+
+    private fun finishRecording(send: Boolean) {
+        val r = recorder ?: return
+        val f = recFile
+        recorder = null
+        recFile = null
+        showRecUi(false)
+        var ok = true
+        try {
+            r.stop()
+        } catch (e: Exception) {
+            ok = false
+        }
+        try {
+            r.release()
+        } catch (e: Exception) {
+            // ignore
+        }
+        val secs = ((System.currentTimeMillis() - recStart) / 1000).toInt()
+        if (f == null) return
+        if (!send || !ok || secs < 1) {
+            f.delete()
+            if (send) toast(L.s("Riƙe don yin rikodi, saki don aikawa.", "Hold to record, release to send."))
+            return
+        }
+        val h = currentChat ?: return
+        sendMediaMessage(h, "a", f, "", secs)
+    }
+
+    private fun stopPlay() {
+        handler.removeCallbacks(playTick)
+        try {
+            player?.release()
+        } catch (e: Exception) {
+            // ignore
+        }
+        player = null
+        playingUid = ""
+        playIconView?.setImageResource(R.drawable.ic_play)
+        playBarView?.progress = 0
+        playIconView = null
+        playBarView = null
+    }
+
+    private fun togglePlay(m: Msg, iv: ImageView, bar: ProgressBar) {
+        if (playingUid == m.uid) {
+            stopPlay()
+            return
+        }
+        stopPlay()
+        try {
+            val mp = MediaPlayer()
+            mp.setDataSource(m.path)
+            mp.prepare()
+            mp.start()
+            player = mp
+            playingUid = m.uid
+            playIconView = iv
+            playBarView = bar
+            iv.setImageResource(R.drawable.ic_pause)
+            bar.max = Math.max(1, mp.duration)
+            mp.setOnCompletionListener { stopPlay() }
+            handler.post(playTick)
+        } catch (e: Exception) {
+            stopPlay()
+            toast(L.s("Ba a iya kunna sautin ba.", "Could not play this voice note."))
+        }
+    }
+
+    // ----- photos, documents, emoji -----
+
+    private fun sendMediaMessage(h: String, kind: String, f: File, name: String, dur: Int) {
+        val m = net.sendMedia(h, kind, f.path, name, dur)
+        Sounds.sent()
+        if (screen == 2 && currentChat == h) appendMsg(m)
+    }
+
+    private fun sendImageUri(uri: Uri) {
+        val h = currentChat ?: return
+        Thread {
+            val f = Media.prepareImage(this, uri)
+            handler.post {
+                if (f == null) toast(L.s("Ba a iya amfani da wannan hoton ba.", "Could not use that photo."))
+                else sendMediaMessage(h, "i", f, "Photo", 0)
+            }
+        }.start()
+    }
+
+    private fun sendDocUri(uri: Uri) {
+        val h = currentChat ?: return
+        Thread {
+            val d = Media.copyDoc(this, uri)
+            handler.post {
+                val f = d.file
+                if (d.tooBig) toast(L.s("Fayil ɗin ya yi girma. Iyaka yanzu 1 MB.", "That file is too big. The limit for now is 1 MB."))
+                else if (f == null) toast(L.s("Ba a iya amfani da fayil ɗin ba.", "Could not use that file."))
+                else sendMediaMessage(h, "d", f, d.name, 0)
+            }
+        }.start()
+    }
+
+    private fun pickImage() {
+        try {
+            val i = Intent(Intent.ACTION_GET_CONTENT)
+            i.type = "image/*"
+            i.addCategory(Intent.CATEGORY_OPENABLE)
+            startActivityForResult(Intent.createChooser(i, L.s("Zaɓi hoto", "Choose a photo")), 11)
+        } catch (e: Exception) {
+            toast(L.s("Ba a iya buɗe gallery ba.", "Could not open the gallery."))
+        }
+    }
+
+    private fun pickDoc() {
+        try {
+            val i = Intent(Intent.ACTION_GET_CONTENT)
+            i.type = "*/*"
+            i.addCategory(Intent.CATEGORY_OPENABLE)
+            startActivityForResult(Intent.createChooser(i, L.s("Zaɓi fayil", "Choose a file")), 13)
+        } catch (e: Exception) {
+            toast(L.s("Ba a iya buɗe fayiloli ba.", "Could not open files."))
+        }
+    }
+
+    private fun takePhoto() {
+        if (Build.VERSION.SDK_INT < 29) {
+            toast(L.s("Wannan wayar ba ta tallafa wa camera a nan tukuna. Yi amfani da Gallery.", "Camera is not supported on this Android version yet. Use Gallery."))
+            return
+        }
+        try {
+            val cv = ContentValues()
+            cv.put(MediaStore.Images.Media.DISPLAY_NAME, "MukhsApp_" + System.currentTimeMillis() + ".jpg")
+            cv.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            cv.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/MukhsApp")
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
+            if (uri == null) {
+                toast(L.s("Ba a iya buɗe camera ba.", "Could not open the camera."))
+                return
+            }
+            camUri = uri
+            val i = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            i.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+            i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivityForResult(i, 12)
+        } catch (e: Exception) {
+            toast(L.s("Ba a iya buɗe camera ba.", "Could not open the camera."))
+        }
+    }
+
+    private fun showAttachSheet() {
+        val d = Dialog(this)
+        d.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = round(C.CARD, 22)
+            setPadding(dp(12), dp(22), dp(12), dp(18))
+        }
+        fun item(res: Int, label: String, color: String, action: () -> Unit) {
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setOnClickListener {
+                    d.dismiss()
+                    action()
+                }
+            }
+            val ic = ImageView(this)
+            ic.setImageResource(res)
+            ic.setColorFilter(Color.WHITE)
+            ic.setPadding(dp(15), dp(15), dp(15), dp(15))
+            ic.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor(color))
+            }
+            col.addView(ic, LinearLayout.LayoutParams(dp(58), dp(58)))
+            col.addView(
+                txt(label, 13f, C.TEXT).apply { gravity = Gravity.CENTER },
+                LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(6) }
+            )
+            box.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+        }
+        item(R.drawable.ic_gallery, "Gallery", "#7E57C2") { pickImage() }
+        item(R.drawable.ic_camera, "Camera", "#EC407A") { takePhoto() }
+        item(R.drawable.ic_doc, L.s("Fayil", "Document"), "#42A5F5") { pickDoc() }
+        val frame = FrameLayout(this)
+        frame.setPadding(dp(12), 0, dp(12), dp(12))
+        frame.addView(box, FrameLayout.LayoutParams(MATCH, WRAP))
+        d.setContentView(frame)
+        d.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        d.window?.setGravity(Gravity.BOTTOM)
+        d.show()
+        d.window?.setLayout(MATCH, WRAP)
+    }
+
+    private val emojiList = (
+        "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😍 🥰 😘 😗 😋 😛 😜 🤪 😎 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🤭 🤫 😶 😐 😑 😬 🙄 😯 😴 🤤 😪 😵 🤐 😷 🤒 🤕 🤢 🤮 🥴 😈 👿 💀 👻 👽 🤖 💩 " +
+            "👍 👎 👌 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ✋ 🤚 👋 👏 🙌 👐 🤲 🙏 🤝 💪 ✍️ 💅 " +
+            "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💯 💢 💥 💫 💦 🔥 ⭐ 🌟 ✨ 🎉 🎊 🎁 🏆 " +
+            "🐶 🐱 🐭 🐰 🦊 🐻 🐼 🦁 🐯 🐮 🐷 🐸 🐵 🐔 🐧 🐦 🦅 🦋 🌹 🌺 🌻 🌴 🌍 🌙 ☀️ ⛅ 🌧️ " +
+            "🍎 🍌 🍉 🍇 🍓 🍕 🍔 🍟 🍗 🍚 ☕ 🍵 🥤 🍰 🍫 🍬 ⚽ 🏀 🚗 ✈️ 🏠 📱 💻 🎧 📷 💰 🕌 📖"
+        ).split(" ")
+
+    private fun buildEmojiPanel(): View {
+        val sv = ScrollView(this)
+        sv.setBackgroundColor(C.BG)
+        sv.visibility = View.GONE
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        var row: LinearLayout? = null
+        var n = 0
+        for (e in emojiList) {
+            if (e.isEmpty()) continue
+            if (n % 8 == 0) {
+                row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                col.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+            }
+            val t = txt(e, 26f, C.TEXT).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, dp(8), 0, dp(8))
+                setOnClickListener {
+                    val et = chatInput
+                    if (et != null) {
+                        val st = Math.max(0, et.selectionStart)
+                        val en = Math.max(0, et.selectionEnd)
+                        et.text.replace(Math.min(st, en), Math.max(st, en), e)
+                    }
+                }
+            }
+            row?.addView(t, LinearLayout.LayoutParams(0, WRAP, 1f))
+            n++
+        }
+        sv.addView(col)
+        return sv
+    }
+
+    private fun toggleEmoji() {
+        val p = emojiPanel ?: return
+        val et = chatInput
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        if (p.visibility == View.VISIBLE) {
+            p.visibility = View.GONE
+            if (et != null) {
+                et.requestFocus()
+                imm.showSoftInput(et, 0)
+            }
+        } else {
+            if (et != null) imm.hideSoftInputFromWindow(et.windowToken, 0)
+            p.visibility = View.VISIBLE
+        }
+    }
+
+    // ----- how photos, voice notes and documents look inside a bubble -----
+
+    private fun mediaView(m: Msg, textColor: Int): View {
+        if (m.kind == "a") {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val iv = ImageView(this)
+            iv.setImageResource(R.drawable.ic_play)
+            iv.setColorFilter(if (m.mine) C.FOREST else C.ACCENT)
+            row.addView(iv, LinearLayout.LayoutParams(dp(40), dp(40)))
+            val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+            bar.max = Math.max(1, m.dur * 1000)
+            bar.progress = 0
+            row.addView(bar, LinearLayout.LayoutParams(dp(130), WRAP).apply { setMargins(dp(4), 0, dp(8), 0) })
+            row.addView(txt(Media.fmtDur(m.dur), 13f, if (m.mine) C.GREY_ON_LIME else C.SUB))
+            row.setOnClickListener { togglePlay(m, iv, bar) }
+            return row
+        }
+        if (m.kind == "i") {
+            val bmp = Media.bitmapFor(m.path, 600)
+            if (bmp == null) {
+                return txt(L.s("Hoto (ba a samu ba)", "Photo (missing)"), 14f, textColor)
+            }
+            val iv = ImageView(this)
+            iv.setImageBitmap(bmp)
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP
+            iv.background = round(Color.parseColor("#22000000"), 12)
+            iv.outlineProvider = ViewOutlineProvider.BACKGROUND
+            iv.clipToOutline = true
+            val w = dp(230)
+            val ratio = bmp.height.toFloat() / Math.max(1, bmp.width)
+            val hh = Math.min(dp(320), Math.max(dp(120), (w * ratio).toInt()))
+            iv.layoutParams = LinearLayout.LayoutParams(w, hh)
+            iv.setOnClickListener { showFullImage(m.path) }
+            return iv
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val ic = ImageView(this)
+        ic.setImageResource(R.drawable.ic_doc)
+        ic.setColorFilter(if (m.mine) C.FOREST else C.ACCENT)
+        row.addView(ic, LinearLayout.LayoutParams(dp(36), dp(36)))
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), 0, dp(6), 0)
+        }
+        col.addView(txt(m.body, 15f, textColor).apply {
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = dp(190)
+        })
+        col.addView(txt(L.s("Danna don ajiyewa", "Tap to save"), 12f, if (m.mine) C.GREY_ON_LIME else C.SUB))
+        row.addView(col)
+        row.setOnClickListener { saveDoc(m) }
+        return row
+    }
+
+    private fun showFullImage(path: String) {
+        val bmp = Media.bitmapFor(path, 1600) ?: return
+        val d = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val iv = ImageView(this)
+        iv.setImageBitmap(bmp)
+        iv.scaleType = ImageView.ScaleType.FIT_CENTER
+        iv.setBackgroundColor(Color.BLACK)
+        iv.setOnClickListener { d.dismiss() }
+        d.setContentView(iv)
+        d.show()
+    }
+
+    // documents are saved into the phone's Downloads folder
+    private fun saveDoc(m: Msg) {
+        if (Build.VERSION.SDK_INT < 29) {
+            toast(L.s("Wannan sigar Android ba ta tallafa wa ajiyewa a nan ba.", "Saving files is not supported on this Android version."))
+            return
+        }
+        try {
+            val name = if (m.body.isEmpty()) "file" else m.body
+            val ext = name.substringAfterLast('.', "").lowercase()
+            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+            val cv = ContentValues()
+            cv.put(MediaStore.Downloads.DISPLAY_NAME, name)
+            cv.put(MediaStore.Downloads.MIME_TYPE, mime)
+            cv.put(MediaStore.Downloads.RELATIVE_PATH, "Download")
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
+            if (uri == null) {
+                toast(L.s("Ba a iya ajiyewa ba.", "Could not save the file."))
+                return
+            }
+            contentResolver.openOutputStream(uri)?.use { out -> out.write(File(m.path).readBytes()) }
+            toast(L.s("An ajiye a Downloads.", "Saved to Downloads."))
+        } catch (e: Exception) {
+            toast(L.s("Ba a iya ajiyewa ba.", "Could not save the file."))
         }
     }
 
@@ -2126,8 +2686,8 @@ class MainActivity : Activity(), NetListener {
         val body = txt(if (long) m.body.substring(0, limit) + "…" else m.body, 16f, textColor).apply {
             maxWidth = (resources.displayMetrics.widthPixels * 0.72).toInt()
         }
-        bubble.addView(body)
-        if (long) {
+        if (m.kind == "t") bubble.addView(body) else bubble.addView(mediaView(m, textColor))
+        if (long && m.kind == "t") {
             val more = txt("Read more", 15f, if (m.mine) C.BLUE_ON_LIME else C.ACCENT, true)
             more.setOnClickListener {
                 body.text = m.body
