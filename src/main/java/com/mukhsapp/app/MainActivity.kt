@@ -10,6 +10,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.res.ColorStateList
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.view.WindowManager
+import android.widget.SeekBar
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
@@ -115,8 +119,16 @@ class MainActivity : Activity(), NetListener {
     private var camUri: Uri? = null
     private var player: MediaPlayer? = null
     private var playingUid = ""
-    private var playIconView: ImageView? = null
-    private var playBarView: ProgressBar? = null
+    private class VoiceUi(
+        val icon: ImageView,
+        val seek: SeekBar,
+        val time: TextView,
+        val chip: TextView,
+        val dur: Int
+    )
+    private val voiceUis = HashMap<String, VoiceUi>()
+    private var playSpeed = 1f
+    private var seeking = false
     private val recTick = object : Runnable {
         override fun run() {
             recTimer?.text = Media.fmtDur(((System.currentTimeMillis() - recStart) / 1000).toInt())
@@ -126,9 +138,17 @@ class MainActivity : Activity(), NetListener {
     private val playTick = object : Runnable {
         override fun run() {
             val p = player
-            if (p != null && p.isPlaying) {
-                playBarView?.progress = p.currentPosition
-                handler.postDelayed(this, 150)
+            try {
+                if (p != null && p.isPlaying) {
+                    val ui = voiceUis[playingUid]
+                    if (ui != null && !seeking) {
+                        ui.seek.progress = p.currentPosition
+                        ui.time.text = Media.fmtDur(p.currentPosition / 1000)
+                    }
+                    handler.postDelayed(this, 100)
+                }
+            } catch (e: Exception) {
+                // the player was released
             }
         }
     }
@@ -815,8 +835,13 @@ class MainActivity : Activity(), NetListener {
 
         val av = avatar(myName, 110, false, "me")
         av.setOnClickListener {
-            keep()
-            pickPhoto()
+            val pic = Profile.bitmap(this, "me")
+            if (pic != null) {
+                showImageViewer(pic, myName, "", "", null)
+            } else {
+                keep()
+                pickPhoto()
+            }
         }
         body.addView(av, LinearLayout.LayoutParams(WRAP, WRAP).apply { gravity = Gravity.CENTER_HORIZONTAL })
         body.addView(
@@ -1378,6 +1403,11 @@ class MainActivity : Activity(), NetListener {
             iv.setImageBitmap(bmp)
             iv.scaleType = ImageView.ScaleType.CENTER_CROP
             top.addView(iv, FrameLayout.LayoutParams(MATCH, MATCH))
+            // tap the big picture to see it full screen
+            iv.setOnClickListener {
+                d.dismiss()
+                showImageViewer(bmp, name, "", "", null)
+            }
         } else {
             val t = TextView(this)
             t.text = initialOf(name)
@@ -2329,6 +2359,7 @@ class MainActivity : Activity(), NetListener {
         reactViews.clear()
         starViews.clear()
         bubbles.clear()
+        voiceUis.clear()
         msgById.clear()
         selected.clear()
         normalHeader = null
@@ -2607,6 +2638,10 @@ class MainActivity : Activity(), NetListener {
         val hab = FrameLayout(this)
         hab.addView(avatar(net.nameOf(h), 40, net.isNearby(h), h))
         headerAvatarBox = hab
+        hab.setOnClickListener {
+            val pic = Profile.bitmap(this, h)
+            if (pic != null) showImageViewer(pic, net.nameOf(h), "", "", null) else viewContact(h)
+        }
         header.addView(hab)
         val titleBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2876,8 +2911,12 @@ class MainActivity : Activity(), NetListener {
 
     private fun previewOf(m: Msg): String =
         if (m.kind == "a") L.s("Saƙon murya", "Voice message") + " (" + Media.fmtDur(m.dur) + ")"
-        else if (m.kind == "i") L.s("Hoto", "Photo")
+        else if (m.kind == "i") (if (captionOf(m).isEmpty()) L.s("Hoto", "Photo") else "📷 " + captionOf(m))
         else m.body
+
+    // the words written under a photo ("Photo" is only the default name, not a caption)
+    private fun captionOf(m: Msg): String =
+        if (m.kind == "i" && m.body != "Photo") m.body.trim() else ""
 
     // ----- voice notes -----
 
@@ -2958,35 +2997,74 @@ class MainActivity : Activity(), NetListener {
             // ignore
         }
         player = null
+        val ui = voiceUis[playingUid]
+        if (ui != null) {
+            ui.icon.setImageResource(R.drawable.ic_play)
+            ui.seek.progress = 0
+            ui.time.text = Media.fmtDur(ui.dur)
+        }
         playingUid = ""
-        playIconView?.setImageResource(R.drawable.ic_play)
-        playBarView?.progress = 0
-        playIconView = null
-        playBarView = null
     }
 
-    private fun togglePlay(m: Msg, iv: ImageView, bar: ProgressBar) {
-        if (playingUid == m.uid) {
-            stopPlay()
-            return
+    private fun speedLabel(): String = if (playSpeed < 1.2f) "1x" else if (playSpeed < 1.7f) "1.5x" else "2x"
+
+    private fun applySpeed(mp: MediaPlayer) {
+        try {
+            mp.playbackParams = mp.playbackParams.setSpeed(playSpeed)
+        } catch (e: Exception) {
+            // this phone cannot change the speed
         }
+    }
+
+    // get a player ready for this voice note (not started yet)
+    private fun ensurePlayer(m: Msg): Boolean {
+        if (playingUid == m.uid && player != null) return true
         stopPlay()
         try {
             val mp = MediaPlayer()
             mp.setDataSource(m.path)
             mp.prepare()
-            mp.start()
+            mp.setOnCompletionListener { stopPlay() }
             player = mp
             playingUid = m.uid
-            playIconView = iv
-            playBarView = bar
-            iv.setImageResource(R.drawable.ic_pause)
-            bar.max = Math.max(1, mp.duration)
-            mp.setOnCompletionListener { stopPlay() }
-            handler.post(playTick)
+            voiceUis[m.uid]?.seek?.max = Math.max(1, mp.duration)
+            return true
         } catch (e: Exception) {
             stopPlay()
             toast(L.s("Ba a iya kunna sautin ba.", "Could not play this voice note."))
+            return false
+        }
+    }
+
+    // play / pause: pausing keeps the place, like WhatsApp
+    private fun togglePlay(m: Msg) {
+        if (!ensurePlayer(m)) return
+        val mp = player ?: return
+        val ui = voiceUis[m.uid]
+        try {
+            handler.removeCallbacks(playTick)
+            if (mp.isPlaying) {
+                mp.pause()
+                ui?.icon?.setImageResource(R.drawable.ic_play)
+            } else {
+                mp.start()
+                applySpeed(mp)
+                ui?.icon?.setImageResource(R.drawable.ic_pause)
+                handler.post(playTick)
+            }
+        } catch (e: Exception) {
+            stopPlay()
+        }
+    }
+
+    private fun cycleSpeed() {
+        playSpeed = if (playSpeed < 1.2f) 1.5f else if (playSpeed < 1.7f) 2f else 1f
+        for (u in voiceUis.values) u.chip.text = speedLabel()
+        val mp = player
+        try {
+            if (mp != null && mp.isPlaying) applySpeed(mp)
+        } catch (e: Exception) {
+            // ignore
         }
     }
 
@@ -3004,7 +3082,7 @@ class MainActivity : Activity(), NetListener {
             val f = Media.prepareImage(this, uri)
             handler.post {
                 if (f == null) toast(L.s("Ba a iya amfani da wannan hoton ba.", "Could not use that photo."))
-                else sendMediaMessage(h, "i", f, "Photo", 0)
+                else showSendPreview(h, f)
             }
         }.start()
     }
@@ -3182,16 +3260,68 @@ class MainActivity : Activity(), NetListener {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
+            val tone = if (m.mine) C.FOREST else C.ACCENT
             val iv = ImageView(this)
             iv.setImageResource(R.drawable.ic_play)
-            iv.setColorFilter(if (m.mine) C.FOREST else C.ACCENT)
+            iv.setColorFilter(tone)
             row.addView(iv, LinearLayout.LayoutParams(dp(40), dp(40)))
-            val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-            bar.max = Math.max(1, m.dur * 1000)
-            bar.progress = 0
-            row.addView(bar, LinearLayout.LayoutParams(dp(130), WRAP).apply { setMargins(dp(4), 0, dp(8), 0) })
-            row.addView(txt(Media.fmtDur(m.dur), 13f, if (m.mine) C.GREY_ON_LIME else C.SUB))
-            row.setOnClickListener { togglePlay(m, iv, bar) }
+            val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val seek = SeekBar(this)
+            seek.max = Math.max(1, m.dur * 1000)
+            seek.progress = 0
+            seek.setPadding(dp(10), dp(6), dp(10), dp(2))
+            seek.progressTintList = ColorStateList.valueOf(tone)
+            seek.thumbTintList = ColorStateList.valueOf(tone)
+            seek.progressBackgroundTintList = ColorStateList.valueOf((tone and 0x00FFFFFF) or 0x55000000)
+            val time = txt(Media.fmtDur(m.dur), 12f, if (m.mine) C.GREY_ON_LIME else C.SUB)
+            time.setPadding(dp(10), 0, 0, 0)
+            mid.addView(seek, LinearLayout.LayoutParams(dp(140), WRAP))
+            mid.addView(time)
+            row.addView(mid)
+            val chip = txt(speedLabel(), 12f, textColor, true).apply {
+                gravity = Gravity.CENTER
+                background = round(Color.parseColor("#22000000"), 12)
+                setPadding(dp(9), dp(4), dp(9), dp(4))
+                setOnClickListener { cycleSpeed() }
+            }
+            row.addView(chip, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(6) })
+            voiceUis[m.uid] = VoiceUi(iv, seek, time, chip, m.dur)
+            seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    if (fromUser) time.text = Media.fmtDur(p / 1000)
+                }
+
+                override fun onStartTrackingTouch(sb: SeekBar?) {
+                    seeking = true
+                }
+
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    seeking = false
+                    if (sb == null) return
+                    val frac = sb.progress.toFloat() / Math.max(1, sb.max)
+                    if (ensurePlayer(m)) {
+                        val mp = player ?: return
+                        val t = (frac * mp.duration).toInt()
+                        try {
+                            mp.seekTo(t)
+                        } catch (e: Exception) {
+                            // ignore
+                        }
+                        sb.progress = t
+                        time.text = Media.fmtDur(t / 1000)
+                    }
+                }
+            })
+            val pick = View.OnLongClickListener {
+                toggleSelect(m.id)
+                true
+            }
+            row.setOnLongClickListener(pick)
+            chip.setOnLongClickListener(pick)
+            iv.setOnLongClickListener(pick)
+            iv.setOnClickListener {
+                if (selected.isNotEmpty()) toggleSelect(m.id) else togglePlay(m)
+            }
             return row
         }
         if (m.kind == "i") {
@@ -3209,8 +3339,22 @@ class MainActivity : Activity(), NetListener {
             val ratio = bmp.height.toFloat() / Math.max(1, bmp.width)
             val hh = Math.min(dp(320), Math.max(dp(120), (w * ratio).toInt()))
             iv.layoutParams = LinearLayout.LayoutParams(w, hh)
-            iv.setOnClickListener { showFullImage(m.path) }
-            return iv
+            iv.setOnClickListener {
+                if (selected.isNotEmpty()) toggleSelect(m.id) else showFullImage(m)
+            }
+            iv.setOnLongClickListener {
+                toggleSelect(m.id)
+                true
+            }
+            val cap = captionOf(m)
+            if (cap.isEmpty()) return iv
+            val colm = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            colm.addView(iv)
+            colm.addView(txt(cap, 16f, textColor).apply {
+                maxWidth = w
+                setPadding(0, dp(6), 0, 0)
+            })
+            return colm
         }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -3235,16 +3379,242 @@ class MainActivity : Activity(), NetListener {
         return row
     }
 
-    private fun showFullImage(path: String) {
-        val bmp = Media.bitmapFor(path, 1600) ?: return
+    private fun showFullImage(m: Msg) {
+        val bmp = Media.bitmapFor(m.path, 1600) ?: return
+        val who = if (m.mine) L.s("Kai", "You") else net.nameOf(currentChat ?: "")
+        showImageViewer(bmp, who, dayLabel(m.ts) + ", " + fmtTime(m.ts), captionOf(m), m.path)
+    }
+
+    // full screen picture: pinch or double-tap to zoom, drag to move, tap to hide the bars,
+    // drag down to close. savePath is set when the picture can be saved to the gallery.
+    private fun showImageViewer(bmp: Bitmap, title: String, sub: String, caption: String, savePath: String?) {
         val d = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
-        val iv = ImageView(this)
-        iv.setImageBitmap(bmp)
-        iv.scaleType = ImageView.ScaleType.FIT_CENTER
-        iv.setBackgroundColor(Color.BLACK)
-        iv.setOnClickListener { d.dismiss() }
-        d.setContentView(iv)
+        val root = FrameLayout(this)
+        root.setBackgroundColor(Color.BLACK)
+        val zv = ZoomImageView(this)
+        zv.setBitmap(bmp)
+        root.addView(zv, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.parseColor("#88000000"))
+            setPadding(dp(4), dp(10), dp(8), dp(8))
+        }
+        top.addView(icon(R.drawable.ic_arrow_back, 24, Color.WHITE) { d.dismiss() })
+        val titles = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(6), 0, dp(6), 0)
+        }
+        titles.addView(txt(title, 17f, Color.WHITE, true).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        if (sub.isNotEmpty()) titles.addView(txt(sub, 12f, Color.parseColor("#CCFFFFFF")))
+        top.addView(titles, LinearLayout.LayoutParams(0, WRAP, 1f))
+        if (savePath != null) top.addView(icon(R.drawable.ic_download, 24, Color.WHITE) { saveImageToGallery(savePath) })
+        root.addView(top, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
+
+        var capBar: View? = null
+        if (caption.isNotEmpty()) {
+            val cb = txt(caption, 16f, Color.WHITE).apply {
+                setBackgroundColor(Color.parseColor("#88000000"))
+                setPadding(dp(16), dp(12), dp(16), dp(16))
+                maxLines = 5
+            }
+            capBar = cb
+            root.addView(cb, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+        }
+        zv.onTap = {
+            val vis = if (top.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            top.visibility = vis
+            capBar?.visibility = vis
+        }
+        zv.onDismiss = { d.dismiss() }
+        d.setContentView(root)
         d.show()
+    }
+
+    // the "download" button in the picture viewer
+    private fun saveImageToGallery(path: String) {
+        if (Build.VERSION.SDK_INT < 29) {
+            toast(L.s("Wannan sigar Android ba ta tallafa wa ajiyewa a nan ba.", "Saving is not supported on this Android version."))
+            return
+        }
+        try {
+            val cv = ContentValues()
+            cv.put(MediaStore.Images.Media.DISPLAY_NAME, "MukhsApp_" + System.currentTimeMillis() + ".jpg")
+            cv.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            cv.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/MukhsApp")
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
+            if (uri == null) {
+                toast(L.s("Ba a iya ajiyewa ba.", "Could not save the photo."))
+                return
+            }
+            contentResolver.openOutputStream(uri)?.use { out -> out.write(File(path).readBytes()) }
+            toast(L.s("An ajiye a Gallery.", "Saved to Gallery."))
+        } catch (e: Exception) {
+            toast(L.s("Ba a iya ajiyewa ba.", "Could not save the photo."))
+        }
+    }
+
+    // after choosing or taking a photo: look at it, write a caption, draw / add text / turn it, then send
+    private fun showSendPreview(h: String, f: File) {
+        val bmp = Media.bitmapFor(f.path, 1280)
+        if (bmp == null) {
+            toast(L.s("Ba a iya amfani da wannan hoton ba.", "Could not use that photo."))
+            return
+        }
+        val d = Dialog(this, android.R.style.Theme_Black_NoTitleBar)
+        d.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        var sent = false
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.BLACK)
+        }
+        val ev = EditImageView(this)
+        ev.setBitmap(bmp)
+
+        // colours for drawing and text
+        val colors = intArrayOf(
+            Color.WHITE, Color.parseColor("#F44336"), Color.parseColor("#FFEB3B"),
+            Color.parseColor("#4CAF50"), Color.parseColor("#2196F3"), Color.parseColor("#9C27B0"), Color.BLACK
+        )
+        val dots = ArrayList<View>()
+        fun markColors() {
+            for (i in dots.indices) {
+                dots[i].background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(colors[i])
+                    setStroke(dp(if (colors[i] == ev.color) 3 else 1), if (colors[i] == ev.color) C.LIME else Color.GRAY)
+                }
+            }
+        }
+
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        topBar.addView(icon(R.drawable.ic_close, 24, Color.WHITE) { d.dismiss() })
+        topBar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        topBar.addView(icon(R.drawable.ic_rotate, 24, Color.WHITE) { ev.rotate() })
+        topBar.addView(icon(R.drawable.ic_text, 24, Color.WHITE) {
+            val et = EditText(this)
+            et.setSingleLine(true)
+            dlg()
+                .setTitle(L.s("Rubuta rubutu", "Add text"))
+                .setView(et)
+                .setPositiveButton("OK") { _, _ ->
+                    val s = et.text.toString().trim()
+                    if (s.isNotEmpty()) {
+                        ev.drawMode = false
+                        ev.addText(s)
+                    }
+                }
+                .setNegativeButton(L.s("Soke", "Cancel"), null)
+                .show()
+        })
+        val colorRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(4), dp(12), dp(4))
+            visibility = View.GONE
+        }
+        val penBtn = icon(R.drawable.ic_edit, 24, Color.WHITE) {}
+        penBtn.setOnClickListener {
+            ev.drawMode = !ev.drawMode
+            penBtn.setColorFilter(if (ev.drawMode) C.LIME else Color.WHITE)
+            colorRow.visibility = if (ev.drawMode) View.VISIBLE else View.GONE
+        }
+        topBar.addView(penBtn)
+        root.addView(topBar, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        for (i in colors.indices) {
+            val dot = View(this)
+            dot.setOnClickListener {
+                ev.color = colors[i]
+                markColors()
+            }
+            dots.add(dot)
+            colorRow.addView(dot, LinearLayout.LayoutParams(dp(28), dp(28)).apply { rightMargin = dp(10) })
+        }
+        colorRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        colorRow.addView(icon(R.drawable.ic_undo, 22, Color.WHITE) { ev.undo() })
+        markColors()
+        root.addView(colorRow, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        root.addView(ev, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        val capIn = EditText(this).apply {
+            hint = L.s("Ƙara bayani...", "Add a caption...")
+            setHintTextColor(Color.parseColor("#99FFFFFF"))
+            setTextColor(Color.WHITE)
+            background = null
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            maxLines = 4
+        }
+        val capBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = round(Color.parseColor("#33FFFFFF"), 24)
+        }
+        capBox.addView(capIn, LinearLayout.LayoutParams(0, WRAP, 1f))
+        root.addView(capBox, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(dp(10), dp(8), dp(10), dp(4)) })
+
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(6), dp(10), dp(10))
+        }
+        val who = txt(net.nameOf(h), 15f, Color.WHITE).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            background = round(Color.parseColor("#33FFFFFF"), 20)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        bottom.addView(who, LinearLayout.LayoutParams(0, WRAP, 1f))
+        val sendBtn = FrameLayout(this)
+        sendBtn.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(C.LIME)
+        }
+        val sendIc = ImageView(this)
+        sendIc.setImageResource(R.drawable.ic_send)
+        sendIc.setColorFilter(C.FOREST)
+        sendIc.setPadding(dp(13), dp(13), dp(13), dp(13))
+        sendBtn.addView(sendIc, FrameLayout.LayoutParams(dp(50), dp(50)))
+        sendBtn.setOnClickListener {
+            sent = true
+            val cap = capIn.text.toString().trim()
+            val name = if (cap.isEmpty()) "Photo" else cap
+            val edited = if (ev.isEdited()) ev.bake() else null
+            d.dismiss()
+            if (edited == null) {
+                sendMediaMessage(h, "i", f, name, 0)
+            } else {
+                Thread {
+                    val nf = Media.saveBitmap(this, edited)
+                    handler.post {
+                        if (nf != null) {
+                            f.delete()
+                            sendMediaMessage(h, "i", nf, name, 0)
+                        } else {
+                            sendMediaMessage(h, "i", f, name, 0)
+                        }
+                    }
+                }.start()
+            }
+        }
+        bottom.addView(sendBtn, LinearLayout.LayoutParams(dp(50), dp(50)).apply { leftMargin = dp(8) })
+        root.addView(bottom, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        d.setOnDismissListener {
+            if (!sent) f.delete()
+        }
+        d.setContentView(root)
+        d.show()
+        d.window?.setLayout(MATCH, MATCH)
     }
 
     // documents are saved into the phone's Downloads folder

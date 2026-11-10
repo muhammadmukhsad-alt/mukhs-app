@@ -86,6 +86,28 @@ object Media {
         }
     }
 
+    // save an edited picture (drawn on, turned) so it can be sent
+    fun saveBitmap(ctx: Context, bmp: Bitmap): File? {
+        return try {
+            var b = bmp
+            val scale = Math.min(1f, 1280f / Math.max(b.width, b.height))
+            if (scale < 1f) b = Bitmap.createScaledBitmap(b, (b.width * scale).toInt(), (b.height * scale).toInt(), true)
+            var q = 85
+            var bytes: ByteArray
+            do {
+                val bos = ByteArrayOutputStream()
+                b.compress(Bitmap.CompressFormat.JPEG, q, bos)
+                bytes = bos.toByteArray()
+                q -= 8
+            } while (bytes.size > 250000 && q > 30)
+            val f = File(dir(ctx), "img_" + System.currentTimeMillis() + ".jpg")
+            f.writeBytes(bytes)
+            f
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     // choose a document (up to 1 MB for now)
     fun copyDoc(ctx: Context, uri: Uri): DocResult {
         var name = "file"
