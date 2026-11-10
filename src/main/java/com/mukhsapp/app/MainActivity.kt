@@ -659,8 +659,15 @@ class MainActivity : Activity(), NetListener {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 11 && resultCode == RESULT_OK) {
-            val u = data?.data
-            if (u != null) sendImageUri(u)
+            val clip = data?.clipData
+            if (clip != null && clip.itemCount > 1) {
+                photoQueue.clear()
+                for (k in 0 until Math.min(clip.itemCount, 10)) photoQueue.add(clip.getItemAt(k).uri)
+                nextQueuedPhoto()
+            } else {
+                val u = data?.data ?: clip?.getItemAt(0)?.uri
+                if (u != null) sendImageUri(u)
+            }
             return
         }
         if (requestCode == 12) {
@@ -3210,6 +3217,14 @@ class MainActivity : Activity(), NetListener {
         if (screen == 2 && currentChat == h) appendMsg(m)
     }
 
+    private val photoQueue = ArrayList<Uri>()
+
+    private fun nextQueuedPhoto() {
+        if (photoQueue.isEmpty() || screen != 2) return
+        val u = photoQueue.removeAt(0)
+        sendImageUri(u)
+    }
+
     private fun sendImageUri(uri: Uri) {
         val h = currentChat ?: return
         Thread {
@@ -3239,6 +3254,7 @@ class MainActivity : Activity(), NetListener {
             val i = Intent(Intent.ACTION_GET_CONTENT)
             i.type = "image/*"
             i.addCategory(Intent.CATEGORY_OPENABLE)
+            if (code == 11) i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
             startActivityForResult(Intent.createChooser(i, L.s("Zaɓi hoto", "Choose a photo")), code)
         } catch (e: Exception) {
             toast(L.s("Ba a iya buɗe gallery ba.", "Could not open the gallery."))
@@ -3624,8 +3640,23 @@ class MainActivity : Activity(), NetListener {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(4), dp(4), dp(4), dp(4))
         }
-        topBar.addView(icon(R.drawable.ic_close, 24, Color.WHITE) { d.dismiss() })
+        topBar.addView(icon(R.drawable.ic_close, 24, Color.WHITE) {
+            photoQueue.clear()
+            d.dismiss()
+        })
         topBar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        val cropBtn = icon(R.drawable.ic_crop, 24, Color.WHITE) {}
+        cropBtn.setOnClickListener {
+            if (ev.cropMode) {
+                ev.applyCrop()
+                cropBtn.setColorFilter(Color.WHITE)
+            } else {
+                ev.startCrop()
+                cropBtn.setColorFilter(C.LIME)
+                toast(L.s("Ja kusurwoyi, sannan ka sake danna don gamawa.", "Drag the corners, then tap again to finish."))
+            }
+        }
+        topBar.addView(cropBtn)
         topBar.addView(icon(R.drawable.ic_rotate, 24, Color.WHITE) { ev.rotate() })
         topBar.addView(icon(R.drawable.ic_text, 24, Color.WHITE) {
             val et = EditText(this)
@@ -3695,7 +3726,8 @@ class MainActivity : Activity(), NetListener {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(6), dp(10), dp(10))
         }
-        val who = txt(net.nameOf(h), 15f, Color.WHITE).apply {
+        val more = if (photoQueue.isEmpty()) "" else "  (+" + photoQueue.size + ")"
+        val who = txt(net.nameOf(h) + more, 15f, Color.WHITE).apply {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
             background = round(Color.parseColor("#33FFFFFF"), 20)
@@ -3716,6 +3748,7 @@ class MainActivity : Activity(), NetListener {
             sent = true
             val cap = capIn.text.toString().trim()
             val name = if (cap.isEmpty()) "Photo" else cap
+            if (ev.cropMode) ev.applyCrop()
             val edited = if (ev.isEdited()) ev.bake() else null
             d.dismiss()
             if (edited == null) {
@@ -3739,7 +3772,9 @@ class MainActivity : Activity(), NetListener {
 
         d.setOnDismissListener {
             if (!sent) f.delete()
+            handler.post { nextQueuedPhoto() }
         }
+        d.setOnCancelListener { photoQueue.clear() }
         d.setContentView(root)
         d.show()
         d.window?.setLayout(MATCH, MATCH)

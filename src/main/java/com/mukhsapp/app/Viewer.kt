@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -189,6 +190,60 @@ class EditImageView(ctx: Context) : View(ctx) {
     var drawMode = false
     var color = Color.WHITE
 
+    // cropping: a box on the picture that you can drag by its corners or move as a whole
+    var cropMode = false
+        private set
+    private val crop = RectF()
+    private var cropGrab = 0
+    private var cropX = 0f
+    private var cropY = 0f
+
+    fun startCrop() {
+        val flat = bake() ?: return
+        base = flat
+        strokes.clear()
+        texts.clear()
+        history.clear()
+        rotated = true
+        drawMode = false
+        cropMode = true
+        crop.set(0f, 0f, flat.width.toFloat(), flat.height.toFloat())
+        layoutMat()
+        invalidate()
+    }
+
+    fun applyCrop() {
+        val b = base
+        if (b != null && cropMode) {
+            val l = Math.max(0, crop.left.toInt())
+            val t = Math.max(0, crop.top.toInt())
+            val w = Math.min(b.width - l, crop.width().toInt())
+            val h = Math.min(b.height - t, crop.height().toInt())
+            if (w > 8 && h > 8) {
+                try {
+                    base = Bitmap.createBitmap(b, l, t, w, h)
+                } catch (e: Exception) {
+                    // keep the old picture
+                }
+            }
+        }
+        cropMode = false
+        layoutMat()
+        invalidate()
+    }
+
+    private fun cropGrabAt(x: Float, y: Float): Int {
+        val r = 56f
+        val pts = floatArrayOf(crop.left, crop.top, crop.right, crop.top, crop.left, crop.bottom, crop.right, crop.bottom)
+        mat.mapPoints(pts)
+        for (i in 0 until 4) {
+            if (Math.abs(x - pts[i * 2]) < r && Math.abs(y - pts[i * 2 + 1]) < r) return i + 1
+        }
+        val q = floatArrayOf(x, y)
+        inv.mapPoints(q)
+        return if (crop.contains(q[0], q[1])) 5 else 0
+    }
+
     fun setBitmap(b: Bitmap) {
         base = b
         layoutMat()
@@ -246,6 +301,24 @@ class EditImageView(ctx: Context) : View(ctx) {
         canvas.drawBitmap(b, 0f, 0f, null)
         drawEdits(canvas, b)
         canvas.restore()
+        if (cropMode) {
+            val pts = floatArrayOf(crop.left, crop.top, crop.right, crop.bottom)
+            mat.mapPoints(pts)
+            paint.style = Paint.Style.FILL
+            paint.color = 0x99000000.toInt()
+            canvas.drawRect(0f, 0f, width.toFloat(), pts[1], paint)
+            canvas.drawRect(0f, pts[3], width.toFloat(), height.toFloat(), paint)
+            canvas.drawRect(0f, pts[1], pts[0], pts[3], paint)
+            canvas.drawRect(pts[2], pts[1], width.toFloat(), pts[3], paint)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 4f
+            paint.color = Color.WHITE
+            canvas.drawRect(pts[0], pts[1], pts[2], pts[3], paint)
+            paint.style = Paint.Style.FILL
+            for (i in 0 until 2) for (j in 0 until 2) {
+                canvas.drawCircle(pts[i * 2], pts[j * 2 + 1], 16f, paint)
+            }
+        }
     }
 
     fun addText(s: String) {
@@ -309,6 +382,39 @@ class EditImageView(ctx: Context) : View(ctx) {
         val b = base ?: return false
         val pts = floatArrayOf(ev.x, ev.y)
         inv.mapPoints(pts)
+        if (cropMode) {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    cropGrab = cropGrabAt(ev.x, ev.y)
+                    cropX = pts[0]
+                    cropY = pts[1]
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val min = sideOf(b) * 0.1f
+                    val px = Math.max(0f, Math.min(b.width.toFloat(), pts[0]))
+                    val py = Math.max(0f, Math.min(b.height.toFloat(), pts[1]))
+                    when (cropGrab) {
+                        1 -> { crop.left = Math.min(px, crop.right - min); crop.top = Math.min(py, crop.bottom - min) }
+                        2 -> { crop.right = Math.max(px, crop.left + min); crop.top = Math.min(py, crop.bottom - min) }
+                        3 -> { crop.left = Math.min(px, crop.right - min); crop.bottom = Math.max(py, crop.top + min) }
+                        4 -> { crop.right = Math.max(px, crop.left + min); crop.bottom = Math.max(py, crop.top + min) }
+                        5 -> {
+                            var dx = pts[0] - cropX
+                            var dy = pts[1] - cropY
+                            if (crop.left + dx < 0f) dx = -crop.left
+                            if (crop.right + dx > b.width) dx = b.width - crop.right
+                            if (crop.top + dy < 0f) dy = -crop.top
+                            if (crop.bottom + dy > b.height) dy = b.height - crop.bottom
+                            crop.offset(dx, dy)
+                            cropX = pts[0]
+                            cropY = pts[1]
+                        }
+                    }
+                    invalidate()
+                }
+            }
+            return true
+        }
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 if (drawMode) {
