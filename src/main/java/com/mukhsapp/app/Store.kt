@@ -24,11 +24,27 @@ data class Msg(
     val dur: Int = 0
 )
 
+// a status (24 hours). owner = "" means it is mine.
+data class Status(
+    val id: Long,
+    val owner: String,
+    val uid: String,
+    val kind: String,
+    val text: String,
+    val bg: Int,
+    val img: String,
+    val aud: String,
+    val ts: Long,
+    val viewed: Boolean
+)
+
+data class StatusOwner(val owner: String, val total: Int, val unviewed: Int, val latest: Long)
+
 data class Convo(val peer: String, val last: Msg, val unread: Int)
 
 private const val COLS = "id, uid, mine, body, ts, state, react, star, quote, qmine, kind, path, dur"
 
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 6) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 7) {
 
     private fun create(db: SQLiteDatabase) {
         db.execSQL(
@@ -41,8 +57,17 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 6) {
         db.execSQL("CREATE TABLE peers(hash TEXT PRIMARY KEY, name TEXT, last_seen INTEGER DEFAULT 0, about TEXT DEFAULT '')")
     }
 
+    private fun createStatus(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS statuses(id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT, uid TEXT UNIQUE, " +
+                "kind TEXT, text TEXT, bg INTEGER, img TEXT, aud TEXT, ts INTEGER, viewed INTEGER DEFAULT 0, vsent INTEGER DEFAULT 1)"
+        )
+        db.execSQL("CREATE TABLE IF NOT EXISTS status_views(uid TEXT, viewer TEXT, ts INTEGER, PRIMARY KEY(uid, viewer))")
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         create(db)
+        createStatus(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -50,6 +75,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 6) {
             db.execSQL("DROP TABLE IF EXISTS msgs")
             db.execSQL("DROP TABLE IF EXISTS peers")
             create(db)
+            createStatus(db)
         } else {
             if (oldVersion < 3) db.execSQL("ALTER TABLE peers ADD COLUMN about TEXT DEFAULT ''")
             if (oldVersion < 4) db.execSQL("ALTER TABLE msgs ADD COLUMN del INTEGER DEFAULT 0")
@@ -59,6 +85,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 6) {
                 db.execSQL("ALTER TABLE msgs ADD COLUMN quote TEXT DEFAULT ''")
                 db.execSQL("ALTER TABLE msgs ADD COLUMN qmine INTEGER DEFAULT 0")
             }
+            if (oldVersion < 7) createStatus(db)
             if (oldVersion < 6) {
                 db.execSQL("ALTER TABLE msgs ADD COLUMN kind TEXT DEFAULT 't'")
                 db.execSQL("ALTER TABLE msgs ADD COLUMN path TEXT DEFAULT ''")
@@ -71,6 +98,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 6) {
         super.onOpen(db)
         // messages deleted earlier (after the UNDO time) are removed for good
         db.execSQL("DELETE FROM msgs WHERE del=1")
+        db.execSQL("DELETE FROM statuses WHERE ts < " + (System.currentTimeMillis() - 86400000L))
     }
 
     private fun readMsg(c: Cursor): Msg =
@@ -293,6 +321,128 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 6) {
         if (c.moveToFirst()) a = c.getString(0) ?: ""
         c.close()
         return a
+    }
+
+    // ---------- statuses ----------
+
+    private fun cutoff(): Long = System.currentTimeMillis() - 86400000L
+
+    private fun readStatus(c: Cursor): Status =
+        Status(
+            c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "t",
+            c.getString(4) ?: "", c.getInt(5), c.getString(6) ?: "", c.getString(7) ?: "",
+            c.getLong(8), c.getInt(9) == 1
+        )
+
+    private val SCOLS = "id, owner, uid, kind, text, bg, img, aud, ts, viewed"
+
+    fun addStatus(s: Status): Long {
+        val cv = ContentValues()
+        cv.put("owner", s.owner)
+        cv.put("uid", s.uid)
+        cv.put("kind", s.kind)
+        cv.put("text", s.text)
+        cv.put("bg", s.bg)
+        cv.put("img", s.img)
+        cv.put("aud", s.aud)
+        cv.put("ts", s.ts)
+        cv.put("viewed", if (s.viewed) 1 else 0)
+        cv.put("vsent", 1)
+        return writableDatabase.insertWithOnConflict("statuses", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
+    }
+
+    fun statuses(owner: String): List<Status> {
+        val out = ArrayList<Status>()
+        val c = readableDatabase.rawQuery(
+            "SELECT $SCOLS FROM statuses WHERE owner=? AND ts>? ORDER BY ts", arrayOf(owner, cutoff().toString())
+        )
+        while (c.moveToNext()) out.add(readStatus(c))
+        c.close()
+        return out
+    }
+
+    // people (not me) who have a status now
+    fun statusOwners(): List<StatusOwner> {
+        val out = ArrayList<StatusOwner>()
+        val c = readableDatabase.rawQuery(
+            "SELECT owner, COUNT(*), SUM(CASE WHEN viewed=0 THEN 1 ELSE 0 END), MAX(ts) FROM statuses " +
+                "WHERE owner<>'' AND ts>? GROUP BY owner ORDER BY MAX(ts) DESC", arrayOf(cutoff().toString())
+        )
+        while (c.moveToNext()) out.add(StatusOwner(c.getString(0) ?: "", c.getInt(1), c.getInt(2), c.getLong(3)))
+        c.close()
+        return out
+    }
+
+    fun statusInfo(owner: String): StatusOwner? {
+        for (o in statusOwners()) if (o.owner == owner) return o
+        return null
+    }
+
+    fun totalUnviewedStatuses(): Int {
+        var n = 0
+        for (o in statusOwners()) n += o.unviewed
+        return n
+    }
+
+    fun hasStatus(uid: String): Boolean {
+        val c = readableDatabase.rawQuery("SELECT 1 FROM statuses WHERE uid=? LIMIT 1", arrayOf(uid))
+        val r = c.moveToFirst()
+        c.close()
+        return r
+    }
+
+    fun deleteStatus(uid: String) {
+        writableDatabase.execSQL("DELETE FROM statuses WHERE uid=?", arrayOf<Any?>(uid))
+        writableDatabase.execSQL("DELETE FROM status_views WHERE uid=?", arrayOf<Any?>(uid))
+    }
+
+    // the owner's list is the truth: remove what they no longer have
+    fun keepOnlyStatuses(owner: String, ids: Collection<String>) {
+        val c = readableDatabase.rawQuery("SELECT uid FROM statuses WHERE owner=?", arrayOf(owner))
+        val gone = ArrayList<String>()
+        while (c.moveToNext()) {
+            val u = c.getString(0) ?: ""
+            if (!ids.contains(u)) gone.add(u)
+        }
+        c.close()
+        for (u in gone) deleteStatus(u)
+    }
+
+    // returns true if this is the first time I see it
+    fun markStatusViewed(uid: String): Boolean {
+        val c = readableDatabase.rawQuery("SELECT viewed FROM statuses WHERE uid=?", arrayOf(uid))
+        var first = false
+        if (c.moveToFirst()) first = c.getInt(0) == 0
+        c.close()
+        if (first) writableDatabase.execSQL("UPDATE statuses SET viewed=1, vsent=0 WHERE uid=?", arrayOf<Any?>(uid))
+        return first
+    }
+
+    fun setViewSent(uid: String) {
+        writableDatabase.execSQL("UPDATE statuses SET vsent=1 WHERE uid=?", arrayOf<Any?>(uid))
+    }
+
+    fun unsentViews(owner: String): List<String> {
+        val out = ArrayList<String>()
+        val c = readableDatabase.rawQuery("SELECT uid FROM statuses WHERE owner=? AND vsent=0", arrayOf(owner))
+        while (c.moveToNext()) out.add(c.getString(0) ?: "")
+        c.close()
+        return out
+    }
+
+    fun addView(uid: String, viewer: String, ts: Long) {
+        writableDatabase.execSQL(
+            "INSERT OR REPLACE INTO status_views(uid, viewer, ts) VALUES(?,?,?)",
+            arrayOf<Any?>(uid, viewer, ts)
+        )
+    }
+
+    fun views(uid: String): List<Pair<String, Long>> {
+        val out = ArrayList<Pair<String, Long>>()
+        val c = readableDatabase.rawQuery("SELECT viewer, ts FROM status_views WHERE uid=? ORDER BY ts DESC", arrayOf(uid))
+        while (c.moveToNext()) out.add(Pair(c.getString(0) ?: "", c.getLong(1)))
+        c.close()
+        return out
     }
 
     fun setReact(uid: String, e: String) {

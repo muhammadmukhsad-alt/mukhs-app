@@ -70,6 +70,8 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
     private val picBuf = HashMap<String, Array<String?>>()
     private val mediaMeta = HashMap<String, JSONObject>()
     private val mediaParts = HashMap<String, Array<String?>>()
+    private val statusMeta = HashMap<String, JSONObject>()
+    private val statusFiles = HashMap<String, String>()
 
     var myHash = ""
     var myName = ""
@@ -233,6 +235,20 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
         mediaMeta.remove(uid)
         mediaParts.remove(uid)
         send(ep, JSONObject().put("t", "d").put("id", uid))
+        if (meta.optString("k") == "si" || meta.optString("k") == "sa") {
+            try {
+                val nm = meta.optString("n")
+                var ex = nm.substringAfterLast('.', "bin").filter { it.isLetterOrDigit() }.take(8)
+                if (ex.isEmpty()) ex = "bin"
+                val sf = File(Media.dir(ctx), "st_" + uid.replace("~", "_") + "." + ex)
+                sf.writeBytes(Base64.decode(parts.joinToString(""), Base64.NO_WRAP))
+                statusFiles[uid] = sf.path
+                checkStatus(h, uid.substringBeforeLast('~'))
+            } catch (e: Exception) {
+                // ignore a broken file
+            }
+            return
+        }
         if (store.hasUid(uid)) return
         try {
             val kind = meta.optString("k")
@@ -252,6 +268,57 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
         } catch (e: Exception) {
             // ignore a broken file
         }
+    }
+
+    // ---------- statuses ----------
+
+    // tell a person which statuses I have now (they ask for the ones they miss)
+    private fun announceStatuses(ep: String) {
+        val arr = JSONArray()
+        for (s in store.statuses("")) arr.put(s.uid)
+        send(ep, JSONObject().put("t", "sa").put("ids", arr))
+    }
+
+    fun announceAll() {
+        for (ep in connected.keys) announceStatuses(ep)
+    }
+
+    private fun sendStatus(ep: String, s: Status) {
+        val hasImg = s.img.isNotEmpty() && File(s.img).exists()
+        val hasAud = s.aud.isNotEmpty() && File(s.aud).exists()
+        send(
+            ep,
+            JSONObject().put("t", "sm").put("id", s.uid).put("ts", s.ts).put("k", s.kind)
+                .put("tx", s.text).put("bg", s.bg).put("im", if (hasImg) 1 else 0).put("au", if (hasAud) 1 else 0)
+        )
+        if (hasImg) sendMediaOut(ep, s.uid + "~i", s.ts, "si", s.img, "s." + File(s.img).extension, 0)
+        if (hasAud) sendMediaOut(ep, s.uid + "~a", s.ts, "sa", s.aud, "s." + File(s.aud).extension, 0)
+    }
+
+    // I watched a status: tell its owner (or keep it for when we meet)
+    fun sendStatusView(h: String, uid: String) {
+        val ep = endpointOfConnected(h) ?: return
+        send(ep, JSONObject().put("t", "sv").put("id", uid))
+        store.setViewSent(uid)
+    }
+
+    private fun checkStatus(h: String, uid: String) {
+        val meta = statusMeta[uid] ?: return
+        val img = statusFiles[uid + "~i"]
+        val aud = statusFiles[uid + "~a"]
+        if (meta.optInt("im") == 1 && img == null) return
+        if (meta.optInt("au") == 1 && aud == null) return
+        statusMeta.remove(uid)
+        statusFiles.remove(uid + "~i")
+        statusFiles.remove(uid + "~a")
+        if (store.hasStatus(uid)) return
+        store.addStatus(
+            Status(
+                0, h, uid, meta.optString("k", "t"), meta.optString("tx"), meta.optInt("bg"),
+                img ?: "", aud ?: "", meta.optLong("ts", System.currentTimeMillis()), false
+            )
+        )
+        ui.onChanged()
     }
 
     fun sendReaction(h: String, uid: String, e: String) {
@@ -358,6 +425,36 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
                     ui.onChanged()
                 }
             }
+        } else if (type == "sa") {
+            val a = j.optJSONArray("ids")
+            val ids = ArrayList<String>()
+            if (a != null) for (i in 0 until a.length()) ids.add(a.optString(i))
+            store.keepOnlyStatuses(h, ids)
+            val missing = JSONArray()
+            for (u in ids) if (!store.hasStatus(u)) missing.put(u)
+            if (missing.length() > 0) send(ep, JSONObject().put("t", "sq").put("ids", missing))
+            ui.onChanged()
+        } else if (type == "sq") {
+            val a = j.optJSONArray("ids")
+            if (a != null) {
+                val mine = store.statuses("")
+                for (i in 0 until a.length()) {
+                    val u = a.optString(i)
+                    for (s in mine) if (s.uid == u) sendStatus(ep, s)
+                }
+            }
+        } else if (type == "sm") {
+            val uid = j.optString("id")
+            if (uid.isNotEmpty() && !store.hasStatus(uid)) {
+                statusMeta[uid] = j
+                checkStatus(h, uid)
+            }
+        } else if (type == "sv") {
+            val uid = j.optString("id")
+            if (uid.isNotEmpty()) {
+                store.addView(uid, h, System.currentTimeMillis())
+                ui.onChanged()
+            }
         } else if (type == "f") {
             val uid = j.optString("id")
             val c = j.optInt("c")
@@ -456,6 +553,8 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
                 store.touchSeen(h)
                 flush(h)
                 sendProfile(endpointId)
+                announceStatuses(endpointId)
+                for (u in store.unsentViews(h)) sendStatusView(h, u)
                 if (openAfterConnect == h) {
                     openAfterConnect = null
                     ui.onOpenChat(h)

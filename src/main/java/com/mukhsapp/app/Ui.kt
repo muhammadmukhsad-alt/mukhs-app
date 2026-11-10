@@ -20,6 +20,8 @@ object C {
     val PILL = Color.parseColor("#0E6A55")
     val BLUE_ON_LIME = Color.parseColor("#0277BD")
     val GREY_ON_LIME = Color.parseColor("#4F6F66")
+    val RING_NEW = Color.parseColor("#3DDC84")
+    val RING_SEEN = Color.parseColor("#9AA5A1")
 
     // theme colours: change with light / dark
     var dark = true
