@@ -13,7 +13,6 @@ import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.view.WindowManager
-import android.widget.SeekBar
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
@@ -121,7 +120,7 @@ class MainActivity : Activity(), NetListener {
     private var playingUid = ""
     private class VoiceUi(
         val icon: ImageView,
-        val seek: SeekBar,
+        val seek: WaveView,
         val time: TextView,
         val chip: TextView,
         val dur: Int
@@ -1637,6 +1636,34 @@ class MainActivity : Activity(), NetListener {
         showHome()
     }
 
+    private var viewerHeld = false
+    private var viewerHeldAt = 0L
+
+    // press and hold on a status: stop the timer and the music, hide the bars so you can read
+    private fun holdViewer(on: Boolean, top: View?) {
+        if (on && !viewerHeld) {
+            viewerHeld = true
+            viewerHeldAt = System.currentTimeMillis()
+            handler.removeCallbacks(viewerTick)
+            try {
+                statusPlayer?.pause()
+            } catch (e: Exception) {
+                // ignore
+            }
+            top?.visibility = View.INVISIBLE
+        } else if (!on && viewerHeld) {
+            viewerHeld = false
+            viewerStart += System.currentTimeMillis() - viewerHeldAt
+            try {
+                statusPlayer?.start()
+            } catch (e: Exception) {
+                // ignore
+            }
+            top?.visibility = View.VISIBLE
+            handler.post(viewerTick)
+        }
+    }
+
     private fun stepViewer(d: Int) {
         val ni = viewerIdx + d
         if (ni >= viewerList.size) {
@@ -1699,11 +1726,36 @@ class MainActivity : Activity(), NetListener {
                 }
             )
         }
-        // tap on the left = back, on the right = next
-        val zones = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        zones.addView(View(this).apply { setOnClickListener { stepViewer(-1) } }, LinearLayout.LayoutParams(0, MATCH, 3f))
-        zones.addView(View(this).apply { setOnClickListener { stepViewer(1) } }, LinearLayout.LayoutParams(0, MATCH, 7f))
-        root.addView(zones, FrameLayout.LayoutParams(MATCH, MATCH))
+        // tap on the left = back, on the right = next, press and hold = pause (like WhatsApp)
+        viewerHeld = false
+        var topRef: View? = null
+        var tapX = 0f
+        val holdRun = Runnable { holdViewer(true, topRef) }
+        val zone = View(this)
+        zone.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    tapX = e.x
+                    handler.postDelayed(holdRun, 220)
+                }
+                MotionEvent.ACTION_UP -> {
+                    handler.removeCallbacks(holdRun)
+                    if (viewerHeld) {
+                        holdViewer(false, topRef)
+                    } else if (tapX < v.width * 0.3f) {
+                        stepViewer(-1)
+                    } else {
+                        stepViewer(1)
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(holdRun)
+                    holdViewer(false, topRef)
+                }
+            }
+            true
+        }
+        root.addView(zone, FrameLayout.LayoutParams(MATCH, MATCH))
 
         val top = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1749,6 +1801,7 @@ class MainActivity : Activity(), NetListener {
         }
         top.addView(hr, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
         root.addView(top, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
+        topRef = top
         setContentView(root)
 
         var dur = 6000L
@@ -1854,13 +1907,16 @@ class MainActivity : Activity(), NetListener {
 
     private fun statusAudioUri(uri: Uri) {
         Thread {
-            val d = Media.copyDoc(this, uri)
+            val d = Media.copyAudio(this, uri)
             handler.post {
                 val f = d.file
                 if (d.tooBig) {
-                    toast(L.s("Kiɗan ya yi girma. Iyaka yanzu 1 MB.", "That audio is too big. The limit for now is 1 MB."))
+                    toast(L.s("Kiɗan ya yi girma. Iyaka yanzu 3 MB.", "That music is too big. The limit for now is 3 MB."))
                 } else if (f == null) {
-                    toast(L.s("Ba a iya amfani da fayil ɗin ba.", "Could not use that file."))
+                    toast(
+                        L.s("Ba a iya amfani da wannan kiɗan ba. Zaɓi fayil na audio (mp3, m4a).", "Could not use that file. Choose an audio file (mp3, m4a).") +
+                            " [" + d.err + "]"
+                    )
                 } else if (screen == 7) {
                     compAud = f
                     compAudName = d.name
@@ -3002,6 +3058,7 @@ class MainActivity : Activity(), NetListener {
             ui.icon.setImageResource(R.drawable.ic_play)
             ui.seek.progress = 0
             ui.time.text = Media.fmtDur(ui.dur)
+            ui.chip.visibility = View.GONE
         }
         playingUid = ""
     }
@@ -3050,6 +3107,7 @@ class MainActivity : Activity(), NetListener {
                 mp.start()
                 applySpeed(mp)
                 ui?.icon?.setImageResource(R.drawable.ic_pause)
+                ui?.chip?.visibility = View.VISIBLE
                 handler.post(playTick)
             }
         } catch (e: Exception) {
@@ -3266,52 +3324,46 @@ class MainActivity : Activity(), NetListener {
             iv.setColorFilter(tone)
             row.addView(iv, LinearLayout.LayoutParams(dp(40), dp(40)))
             val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            val seek = SeekBar(this)
+            val seek = WaveView(this, m.uid.hashCode())
+            seek.tone = tone
             seek.max = Math.max(1, m.dur * 1000)
             seek.progress = 0
-            seek.setPadding(dp(10), dp(6), dp(10), dp(2))
-            seek.progressTintList = ColorStateList.valueOf(tone)
-            seek.thumbTintList = ColorStateList.valueOf(tone)
-            seek.progressBackgroundTintList = ColorStateList.valueOf((tone and 0x00FFFFFF) or 0x55000000)
             val time = txt(Media.fmtDur(m.dur), 12f, if (m.mine) C.GREY_ON_LIME else C.SUB)
-            time.setPadding(dp(10), 0, 0, 0)
-            mid.addView(seek, LinearLayout.LayoutParams(dp(140), WRAP))
+            time.setPadding(dp(2), 0, 0, 0)
+            mid.addView(seek, LinearLayout.LayoutParams(dp(150), dp(32)))
             mid.addView(time)
             row.addView(mid)
             val chip = txt(speedLabel(), 12f, textColor, true).apply {
                 gravity = Gravity.CENTER
                 background = round(Color.parseColor("#22000000"), 12)
                 setPadding(dp(9), dp(4), dp(9), dp(4))
+                visibility = if (playingUid == m.uid && player?.isPlaying == true) View.VISIBLE else View.GONE
                 setOnClickListener { cycleSpeed() }
             }
             row.addView(chip, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(6) })
             voiceUis[m.uid] = VoiceUi(iv, seek, time, chip, m.dur)
-            seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    if (fromUser) time.text = Media.fmtDur(p / 1000)
-                }
-
-                override fun onStartTrackingTouch(sb: SeekBar?) {
+            seek.onTouchSeek = { ev, frac ->
+                if (ev == 0) {
                     seeking = true
-                }
-
-                override fun onStopTrackingTouch(sb: SeekBar?) {
+                } else if (ev == 1) {
+                    time.text = Media.fmtDur((frac * seek.max).toInt() / 1000)
+                } else {
                     seeking = false
-                    if (sb == null) return
-                    val frac = sb.progress.toFloat() / Math.max(1, sb.max)
                     if (ensurePlayer(m)) {
-                        val mp = player ?: return
-                        val t = (frac * mp.duration).toInt()
-                        try {
-                            mp.seekTo(t)
-                        } catch (e: Exception) {
-                            // ignore
+                        val mp = player
+                        if (mp != null) {
+                            val t = (frac * mp.duration).toInt()
+                            try {
+                                mp.seekTo(t)
+                            } catch (e: Exception) {
+                                // ignore
+                            }
+                            seek.progress = t
+                            time.text = Media.fmtDur(t / 1000)
                         }
-                        sb.progress = t
-                        time.text = Media.fmtDur(t / 1000)
                     }
                 }
-            })
+            }
             val pick = View.OnLongClickListener {
                 toggleSelect(m.id)
                 true
