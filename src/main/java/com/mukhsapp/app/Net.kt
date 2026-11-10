@@ -459,7 +459,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
         } else if (type == "f") {
             val uid = j.optString("id")
             val c = j.optInt("c")
-            if (uid.isNotEmpty() && c in 1..260) {
+            if (uid.isNotEmpty() && c in 1..700) {
                 mediaMeta[uid] = j
                 checkMedia(h, ep, uid)
             }
@@ -467,7 +467,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
             val uid = j.optString("id")
             val i = j.optInt("i")
             val c = j.optInt("c")
-            if (uid.isNotEmpty() && c in 1..260 && i in 0 until c) {
+            if (uid.isNotEmpty() && c in 1..700 && i in 0 until c) {
                 var buf: Array<String?>? = mediaParts[uid]
                 if (buf == null || buf.size != c) {
                     buf = arrayOfNulls<String>(c)

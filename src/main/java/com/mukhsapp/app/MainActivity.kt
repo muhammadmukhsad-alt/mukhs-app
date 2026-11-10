@@ -1986,7 +1986,7 @@ class MainActivity : Activity(), NetListener {
             handler.post {
                 val f = d.file
                 if (d.tooBig) {
-                    toast(L.s("Kiɗan ya yi girma. Iyaka yanzu 3 MB.", "That music is too big. The limit for now is 3 MB."))
+                    toast(L.s("Kiɗan ya yi girma. Iyaka yanzu 10 MB.", "That music is too big. The limit for now is 10 MB."))
                 } else if (f == null) {
                     toast(
                         L.s("Ba a iya amfani da wannan kiɗan ba. Zaɓi fayil na audio (mp3, m4a).", "Could not use that file. Choose an audio file (mp3, m4a).") +
@@ -3866,6 +3866,8 @@ class MainActivity : Activity(), NetListener {
         val long = m.body.length > limit
         val body = txt(if (long) m.body.substring(0, limit) + "…" else m.body, 16f, textColor).apply {
             maxWidth = (resources.displayMetrics.widthPixels * 0.72).toInt()
+            setHorizontallyScrolling(false)
+            setSingleLine(false)
         }
         if (m.kind == "t") bubble.addView(body) else bubble.addView(mediaView(m, textColor))
         if (long && m.kind == "t") {
@@ -3885,7 +3887,7 @@ class MainActivity : Activity(), NetListener {
         rv.text = m.react
         rv.visibility = if (m.react.isEmpty()) View.GONE else View.VISIBLE
         reactViews[m.uid] = rv
-        meta.addView(rv, LinearLayout.LayoutParams(0, WRAP, 1f))
+        meta.addView(rv, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(6) })
         val sv = txt("★", 11f, if (m.mine) C.GREY_ON_LIME else C.SUB)
         sv.visibility = if (m.star) View.VISIBLE else View.GONE
         sv.setPadding(0, 0, dp(4), 0)
@@ -3898,7 +3900,7 @@ class MainActivity : Activity(), NetListener {
             meta.addView(tv)
             tickViews[m.uid] = tv
         }
-        bubble.addView(meta, LinearLayout.LayoutParams(MATCH, WRAP))
+        bubble.addView(meta, LinearLayout.LayoutParams(WRAP, WRAP).apply { gravity = Gravity.END })
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = if (m.mine) Gravity.END else Gravity.START

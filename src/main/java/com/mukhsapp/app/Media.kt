@@ -17,7 +17,7 @@ class AudioResult(val file: File?, val name: String, val tooBig: Boolean, val er
 // photos, voice notes and documents that are sent inside chats
 object Media {
     const val MAX_DOC = 1000000
-    const val MAX_AUDIO = 3000000
+    const val MAX_AUDIO = 10000000
 
     fun dir(ctx: Context): File {
         val d = File(ctx.filesDir, "media")

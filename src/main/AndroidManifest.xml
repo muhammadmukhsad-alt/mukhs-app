@@ -20,6 +20,7 @@
         android:usesPermissionFlags="neverForLocation" />
 
     <application
+        android:largeHeap="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:label="MukhsApp"
