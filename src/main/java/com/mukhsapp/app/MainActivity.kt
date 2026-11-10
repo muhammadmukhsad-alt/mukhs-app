@@ -40,6 +40,8 @@ import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.HapticFeedbackConstants
+import android.view.ViewConfiguration
 import android.view.View
 import android.view.ViewOutlineProvider
 import android.view.Window
@@ -1927,10 +1929,10 @@ class MainActivity : Activity(), NetListener {
 
     private fun pickAudio() {
         try {
-            val i = Intent(Intent.ACTION_GET_CONTENT)
+            val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
             i.type = "audio/*"
             i.addCategory(Intent.CATEGORY_OPENABLE)
-            startActivityForResult(Intent.createChooser(i, L.s("Zaɓi kiɗa", "Choose music")), 23)
+            startActivityForResult(i, 23)
         } catch (e: Exception) {
             toast(L.s("Ba a iya buɗe fayiloli ba.", "Could not open files."))
         }
@@ -2560,11 +2562,16 @@ class MainActivity : Activity(), NetListener {
     private fun startReply() {
         val id = selected.firstOrNull() ?: return
         val m = msgById[id] ?: return
+        startReplyTo(m)
+    }
+
+    private fun startReplyTo(m: Msg) {
         replyTo = m
         replyName?.text = if (m.mine) L.s("Kai", "You") else net.nameOf(currentChat ?: "")
         replyText?.text = snippet(m)
         replyBar?.visibility = View.VISIBLE
         clearSelection()
+        chatInput?.requestFocus()
     }
 
     private fun cancelReply() {
@@ -3128,7 +3135,10 @@ class MainActivity : Activity(), NetListener {
     // ----- photos, documents, emoji -----
 
     private fun sendMediaMessage(h: String, kind: String, f: File, name: String, dur: Int) {
-        val m = net.sendMedia(h, kind, f.path, name, dur)
+        val rep = replyTo
+        val m = if (rep != null) net.sendMedia(h, kind, f.path, name, dur, snippet(rep), rep.mine)
+        else net.sendMedia(h, kind, f.path, name, dur)
+        cancelReply()
         Sounds.sent()
         if (screen == 2 && currentChat == h) appendMsg(m)
     }
@@ -3801,6 +3811,55 @@ class MainActivity : Activity(), NetListener {
         }
         row.setOnClickListener {
             if (selected.isNotEmpty()) toggleSelect(m.id)
+        }
+        // slide a message to the right to reply to it (text, voice note or photo)
+        var sx = 0f
+        var sy = 0f
+        var sliding = false
+        var buzzed = false
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
+        row.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    sx = ev.rawX
+                    sy = ev.rawY
+                    sliding = false
+                    buzzed = false
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = ev.rawX - sx
+                    val dy = ev.rawY - sy
+                    if (!sliding && dx > slop * 2 && dx > Math.abs(dy) * 1.5f && selected.isEmpty()) {
+                        sliding = true
+                        row.cancelLongPress()
+                        row.parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    if (sliding) {
+                        val shift = Math.min(dx, dp(90).toFloat())
+                        bubble.translationX = shift
+                        if (!buzzed && dx > dp(64)) {
+                            buzzed = true
+                            row.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (sliding) {
+                        sliding = false
+                        val done = ev.actionMasked == MotionEvent.ACTION_UP && ev.rawX - sx > dp(64)
+                        bubble.animate().translationX(0f).setDuration(150).start()
+                        if (done) startReplyTo(m)
+                        true
+                    } else {
+                        false
+                    }
+                }
+                else -> false
+            }
         }
         box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
         chatScroll?.post { chatScroll?.fullScroll(View.FOCUS_DOWN) }

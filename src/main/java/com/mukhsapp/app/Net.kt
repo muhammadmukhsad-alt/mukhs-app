@@ -197,34 +197,33 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
     }
 
     // a photo, voice note or document: a small header, then the file in pieces
-    private fun sendMediaOut(ep: String, uid: String, ts: Long, kind: String, path: String, name: String, dur: Int) {
+    private fun sendMediaOut(ep: String, uid: String, ts: Long, kind: String, path: String, name: String, dur: Int, quote: String = "", qmine: Boolean = false) {
         val f = File(path)
         if (!f.exists()) return
         val b64 = Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)
         val size = 20000
         val total = (b64.length + size - 1) / size
-        send(
-            ep,
-            JSONObject().put("t", "f").put("id", uid).put("ts", ts).put("k", kind)
-                .put("n", name).put("dur", dur).put("c", total)
-        )
+        val head = JSONObject().put("t", "f").put("id", uid).put("ts", ts).put("k", kind)
+            .put("n", name).put("dur", dur).put("c", total)
+        if (quote.isNotEmpty()) head.put("q", quote).put("qw", if (qmine) 1 else 0)
+        send(ep, head)
         for (i in 0 until total) {
             val part = b64.substring(i * size, minOf(b64.length, (i + 1) * size))
             send(ep, JSONObject().put("t", "fc").put("id", uid).put("i", i).put("c", total).put("d", part))
         }
     }
 
-    fun sendMedia(h: String, kind: String, path: String, name: String, dur: Int): Msg {
+    fun sendMedia(h: String, kind: String, path: String, name: String, dur: Int, quote: String = "", qmine: Boolean = false): Msg {
         val uid = UUID.randomUUID().toString()
         val ts = System.currentTimeMillis()
         val ep = endpointOfConnected(h)
         var state = 0
         if (ep != null) {
-            sendMediaOut(ep, uid, ts, kind, path, name, dur)
+            sendMediaOut(ep, uid, ts, kind, path, name, dur, quote, qmine)
             state = 1
         }
-        val id = store.insertOut(h, uid, name, ts, state, "", false, kind, path, dur)
-        return Msg(id, uid, true, name, ts, state, "", false, "", false, kind, path, dur)
+        val id = store.insertOut(h, uid, name, ts, state, quote, qmine, kind, path, dur)
+        return Msg(id, uid, true, name, ts, state, "", false, quote, qmine, kind, path, dur)
     }
 
     private fun checkMedia(h: String, ep: String, uid: String) {
@@ -261,10 +260,12 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
             val ts = meta.optLong("ts", System.currentTimeMillis())
             val dur = meta.optInt("dur")
             val viewing = foreground && activeChat == h
-            val rowId = store.insertIn(h, uid, name, ts, !viewing, "", false, kind, f.path, dur)
+            val mq = meta.optString("q")
+            val mqm = meta.optInt("qw") == 1
+            val rowId = store.insertIn(h, uid, name, ts, !viewing, mq, mqm, kind, f.path, dur)
             store.touchSeen(h)
             if (viewing) sendReadAck(ep, listOf(uid))
-            ui.onIncoming(h, Msg(rowId, uid, false, name, ts, 0, "", false, "", false, kind, f.path, dur))
+            ui.onIncoming(h, Msg(rowId, uid, false, name, ts, 0, "", false, mq, mqm, kind, f.path, dur))
         } catch (e: Exception) {
             // ignore a broken file
         }
@@ -366,7 +367,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
         val ep = endpointOfConnected(h) ?: return
         for (m in store.pendingOut(h)) {
             if (m.kind == "t") send(ep, msgJson(m.uid, m.ts, m.body, m.quote, m.qmine))
-            else sendMediaOut(ep, m.uid, m.ts, m.kind, m.path, m.body, m.dur)
+            else sendMediaOut(ep, m.uid, m.ts, m.kind, m.path, m.body, m.dur, m.quote, m.qmine)
             store.setState(m.uid, 1)
         }
         val reads = store.unackedReads(h)
