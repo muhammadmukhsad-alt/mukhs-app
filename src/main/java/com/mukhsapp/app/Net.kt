@@ -459,7 +459,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
         } else if (type == "f") {
             val uid = j.optString("id")
             val c = j.optInt("c")
-            if (uid.isNotEmpty() && c in 1..80) {
+            if (uid.isNotEmpty() && c in 1..260) {
                 mediaMeta[uid] = j
                 checkMedia(h, ep, uid)
             }
@@ -467,7 +467,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
             val uid = j.optString("id")
             val i = j.optInt("i")
             val c = j.optInt("c")
-            if (uid.isNotEmpty() && c in 1..80 && i in 0 until c) {
+            if (uid.isNotEmpty() && c in 1..260 && i in 0 until c) {
                 var buf: Array<String?>? = mediaParts[uid]
                 if (buf == null || buf.size != c) {
                     buf = arrayOfNulls<String>(c)
@@ -493,7 +493,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
 
     private val payloadCallback = object : PayloadCallback() {
         override fun onPayloadReceived(endpointId: String, payload: Payload) {
-            val h = connected[endpointId] ?: return
+            val h = connected[endpointId] ?: pendingConn[endpointId]?.first ?: return
             if (payload.type != Payload.Type.BYTES) return
             val bytes = payload.asBytes() ?: return
             try {
@@ -556,6 +556,12 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
                 sendProfile(endpointId)
                 announceStatuses(endpointId)
                 for (u in store.unsentViews(h)) sendStatusView(h, u)
+                handler.postDelayed({
+                    if (connected.containsKey(endpointId)) {
+                        sendProfile(endpointId)
+                        announceStatuses(endpointId)
+                    }
+                }, 2500)
                 if (openAfterConnect == h) {
                     openAfterConnect = null
                     ui.onOpenChat(h)

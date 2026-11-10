@@ -1064,6 +1064,7 @@ class MainActivity : Activity(), NetListener {
                 gravity = Gravity.CENTER_HORIZONTAL
                 setOnClickListener {
                     tab = i
+                    if (i == 1) net.announceAll()
                     renderTab()
                 }
             }
@@ -1708,7 +1709,10 @@ class MainActivity : Activity(), NetListener {
                 cap.setBackgroundColor(Color.parseColor("#99000000"))
                 cap.setPadding(dp(18), dp(14), dp(18), dp(14))
                 cap.gravity = Gravity.CENTER
-                root.addView(cap, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+                root.addView(
+                    cap,
+                    FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM).apply { bottomMargin = if (own) 0 else dp(64) }
+                )
             } else {
                 val big = txt(st.text, 28f, Color.WHITE, true)
                 big.gravity = Gravity.CENTER
@@ -1803,6 +1807,32 @@ class MainActivity : Activity(), NetListener {
         top.addView(hr, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
         root.addView(top, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
         topRef = top
+        if (!own) {
+            val bb = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(14), dp(12), dp(14))
+                background = GradientDrawable(
+                    GradientDrawable.Orientation.BOTTOM_TOP,
+                    intArrayOf(Color.parseColor("#99000000"), Color.TRANSPARENT)
+                )
+            }
+            val pill = txt(L.s("Amsa", "Reply"), 15f, Color.WHITE).apply {
+                background = round(Color.parseColor("#55000000"), 24)
+                setPadding(dp(18), dp(11), dp(18), dp(11))
+                setOnClickListener { replyToStatus(st, "", topRef) }
+            }
+            bb.addView(pill, LinearLayout.LayoutParams(0, WRAP, 1f))
+            for (e in arrayOf("❤️", "🙏", "😂")) {
+                bb.addView(
+                    txt(e, 26f, Color.WHITE).apply {
+                        setPadding(dp(10), dp(4), dp(10), dp(4))
+                        setOnClickListener { replyToStatus(st, e, topRef) }
+                    }
+                )
+            }
+            root.addView(bb, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+        }
         setContentView(root)
 
         var dur = 6000L
@@ -1822,6 +1852,43 @@ class MainActivity : Activity(), NetListener {
         viewerStart = System.currentTimeMillis()
         handler.post(viewerTick)
         if (!own && store.markStatusViewed(st.uid)) net.sendStatusView(viewerOwner, st.uid)
+    }
+
+    // answer someone's status: it arrives in our chat as a reply with the status quoted
+    private fun sendStatusReply(owner: String, text: String, st: Status) {
+        val what = if (st.kind == "i") "📷 " + (if (st.text.isEmpty()) L.s("Matsayi", "Status") else st.text)
+        else L.s("Matsayi", "Status") + ": " + st.text
+        val q = if (what.length > 100) what.substring(0, 100) + "…" else what
+        net.sendText(owner, text, q, false)
+        Sounds.sent()
+        toast(L.s("An aika amsa.", "Reply sent."))
+    }
+
+    private fun replyToStatus(st: Status, emoji: String, top: View?) {
+        val owner = viewerOwner
+        if (owner.isEmpty()) return
+        if (emoji.isNotEmpty()) {
+            sendStatusReply(owner, emoji, st)
+            return
+        }
+        holdViewer(true, top)
+        val et = EditText(this)
+        et.hint = L.s("Rubuta amsa…", "Type a reply…")
+        et.setPadding(dp(20), dp(16), dp(20), dp(16))
+        val d = dlg()
+            .setTitle(L.s("Amsa ga matsayi", "Reply to status"))
+            .setView(et)
+            .setPositiveButton(L.s("Aika", "Send")) { _, _ ->
+                val t = et.text.toString().trim()
+                if (t.isNotEmpty()) sendStatusReply(owner, t, st)
+            }
+            .setNegativeButton(L.s("Soke", "Cancel"), null)
+            .create()
+        d.setOnDismissListener {
+            if (screen == 6) holdViewer(false, top)
+        }
+        d.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        d.show()
     }
 
     private fun showViewersDialog(st: Status) {
