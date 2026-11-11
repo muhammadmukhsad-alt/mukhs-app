@@ -11,6 +11,8 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.content.ContentUris
 import android.view.WindowManager
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -1039,7 +1041,7 @@ class MainActivity : Activity(), NetListener {
                 setColor(C.LIME)
             }
             cam.elevation = dp(6).toFloat()
-            cam.setOnClickListener { choosePhotoStatus() }
+            cam.setOnClickListener { showAddStatusSheet() }
             fc.addView(
                 pen,
                 FrameLayout.LayoutParams(dp(46), dp(46), Gravity.BOTTOM or Gravity.END).apply {
@@ -1646,6 +1648,8 @@ class MainActivity : Activity(), NetListener {
     }
 
     private var viewerHeld = false
+    private var replyOpen = false
+    private var closeReplyRef: (() -> Unit)? = null
     private var viewerHeldAt = 0L
 
     // press and hold on a status: stop the timer and the music, hide the bars so you can read
@@ -1740,6 +1744,8 @@ class MainActivity : Activity(), NetListener {
         }
         // tap on the left = back, on the right = next, press and hold = pause (like WhatsApp)
         viewerHeld = false
+        replyOpen = false
+        closeReplyRef = null
         var topRef: View? = null
         var tapX = 0f
         val holdRun = Runnable { holdViewer(true, topRef) }
@@ -1752,7 +1758,9 @@ class MainActivity : Activity(), NetListener {
                 }
                 MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(holdRun)
-                    if (viewerHeld) {
+                    if (replyOpen) {
+                        closeReplyRef?.invoke()
+                    } else if (viewerHeld) {
                         holdViewer(false, topRef)
                     } else if (tapX < v.width * 0.3f) {
                         stepViewer(-1)
@@ -1815,28 +1823,94 @@ class MainActivity : Activity(), NetListener {
         root.addView(top, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
         topRef = top
         if (!own) {
-            val bb = LinearLayout(this).apply {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            val bb = FrameLayout(this)
+            bb.setBackgroundColor(Color.TRANSPARENT)
+            val normal = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(12), dp(14), dp(12), dp(14))
-                background = GradientDrawable(
-                    GradientDrawable.Orientation.BOTTOM_TOP,
-                    intArrayOf(Color.parseColor("#99000000"), Color.TRANSPARENT)
-                )
+                setPadding(dp(12), dp(10), dp(12), dp(14))
             }
-            val pill = txt(L.s("Amsa", "Reply"), 15f, Color.WHITE).apply {
-                background = round(Color.parseColor("#55000000"), 24)
-                setPadding(dp(18), dp(11), dp(18), dp(11))
-                setOnClickListener { replyToStatus(st, "", topRef) }
+            val pill = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = round(Color.parseColor("#88000000"), 28)
+                setPadding(dp(20), 0, dp(12), 0)
             }
-            bb.addView(pill, LinearLayout.LayoutParams(0, WRAP, 1f))
-            for (e in arrayOf("❤️", "🙏", "😂")) {
-                bb.addView(
+            pill.addView(
+                txt(L.s("Amsa", "Reply"), 16f, Color.WHITE).apply { setPadding(0, dp(14), 0, dp(14)) },
+                LinearLayout.LayoutParams(0, WRAP, 1f)
+            )
+            for (e in arrayOf("😍", "😂")) {
+                pill.addView(
                     txt(e, 26f, Color.WHITE).apply {
-                        setPadding(dp(10), dp(4), dp(10), dp(4))
-                        setOnClickListener { replyToStatus(st, e, topRef) }
+                        setPadding(dp(10), dp(6), dp(10), dp(6))
+                        setOnClickListener { sendStatusReply(viewerOwner, e, st) }
                     }
                 )
+            }
+            normal.addView(pill, LinearLayout.LayoutParams(0, WRAP, 1f))
+            val heart = txt("❤️", 24f, Color.WHITE).apply {
+                gravity = Gravity.CENTER
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor("#88000000"))
+                }
+                setOnClickListener { sendStatusReply(viewerOwner, "❤️", st) }
+            }
+            normal.addView(heart, LinearLayout.LayoutParams(dp(52), dp(52)).apply { leftMargin = dp(10) })
+            bb.addView(normal, FrameLayout.LayoutParams(MATCH, WRAP))
+
+            val typing = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), dp(8), dp(10), dp(10))
+                setBackgroundColor(Color.parseColor("#CC000000"))
+                visibility = View.GONE
+            }
+            val et = EditText(this).apply {
+                hint = L.s("Rubuta amsa…", "Type a reply…")
+                setHintTextColor(Color.parseColor("#99FFFFFF"))
+                setTextColor(Color.WHITE)
+                background = round(Color.parseColor("#33FFFFFF"), 24)
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                maxLines = 4
+            }
+            typing.addView(et, LinearLayout.LayoutParams(0, WRAP, 1f))
+            val goBtn = ImageView(this).apply {
+                setImageResource(R.drawable.ic_send)
+                setColorFilter(C.FOREST)
+                setPadding(dp(13), dp(13), dp(13), dp(13))
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(C.LIME)
+                }
+            }
+            typing.addView(goBtn, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(8) })
+            bb.addView(typing, FrameLayout.LayoutParams(MATCH, WRAP))
+
+            closeReplyRef = {
+                imm.hideSoftInputFromWindow(et.windowToken, 0)
+                typing.visibility = View.GONE
+                normal.visibility = View.VISIBLE
+                et.setText("")
+                replyOpen = false
+                holdViewer(false, topRef)
+            }
+            pill.setOnClickListener {
+                replyOpen = true
+                holdViewer(true, topRef)
+                normal.visibility = View.GONE
+                typing.visibility = View.VISIBLE
+                et.requestFocus()
+                imm.showSoftInput(et, 0)
+            }
+            goBtn.setOnClickListener {
+                android.view.inputmethod.BaseInputConnection.removeComposingSpans(et.text)
+                val t = et.text.toString().trim()
+                if (t.isNotEmpty()) sendStatusReply(viewerOwner, t, st)
+                closeReplyRef?.invoke()
             }
             root.addView(bb, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
         }
@@ -1869,33 +1943,6 @@ class MainActivity : Activity(), NetListener {
         net.sendText(owner, text, q, false)
         Sounds.sent()
         toast(L.s("An aika amsa.", "Reply sent."))
-    }
-
-    private fun replyToStatus(st: Status, emoji: String, top: View?) {
-        val owner = viewerOwner
-        if (owner.isEmpty()) return
-        if (emoji.isNotEmpty()) {
-            sendStatusReply(owner, emoji, st)
-            return
-        }
-        holdViewer(true, top)
-        val et = EditText(this)
-        et.hint = L.s("Rubuta amsa…", "Type a reply…")
-        et.setPadding(dp(20), dp(16), dp(20), dp(16))
-        val d = dlg()
-            .setTitle(L.s("Amsa ga matsayi", "Reply to status"))
-            .setView(et)
-            .setPositiveButton(L.s("Aika", "Send")) { _, _ ->
-                val t = et.text.toString().trim()
-                if (t.isNotEmpty()) sendStatusReply(owner, t, st)
-            }
-            .setNegativeButton(L.s("Soke", "Cancel"), null)
-            .create()
-        d.setOnDismissListener {
-            if (screen == 6) holdViewer(false, top)
-        }
-        d.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
-        d.show()
     }
 
     private fun showViewersDialog(st: Status) {
@@ -1939,6 +1986,164 @@ class MainActivity : Activity(), NetListener {
             }
             .setNegativeButton(L.s("Soke", "Cancel"), null)
             .show()
+    }
+
+    // ----- the "Add status" sheet, like WhatsApp: Text / Music / Voice and your recent photos -----
+
+    private fun imagePerm(): String =
+        if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_IMAGES
+        else Manifest.permission.READ_EXTERNAL_STORAGE
+
+    private fun thumbOf(uri: Uri, px: Int): Bitmap? {
+        try {
+            val o = BitmapFactory.Options()
+            o.inJustDecodeBounds = true
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
+            var sample = 1
+            while (o.outWidth / (sample * 2) >= px && o.outHeight / (sample * 2) >= px) sample *= 2
+            val o2 = BitmapFactory.Options()
+            o2.inSampleSize = sample
+            return contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o2) }
+        } catch (e: Throwable) {
+            return null
+        }
+    }
+
+    private fun recentImages(max: Int): List<Uri> {
+        val out = ArrayList<Uri>()
+        try {
+            val c = contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Images.Media._ID),
+                null, null, MediaStore.Images.Media.DATE_ADDED + " DESC"
+            )
+            if (c != null) {
+                while (c.moveToNext() && out.size < max) {
+                    out.add(ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, c.getLong(0)))
+                }
+                c.close()
+            }
+        } catch (e: Throwable) {
+            // no access
+        }
+        return out
+    }
+
+    private fun showAddStatusSheet() {
+        val d = Dialog(
+            this,
+            if (C.dark) android.R.style.Theme_Material_NoActionBar else android.R.style.Theme_Material_Light_NoActionBar
+        )
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(C.BG)
+        }
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(10), dp(8), dp(10))
+        }
+        head.addView(icon(R.drawable.ic_close, 24, C.TEXT) { d.dismiss() })
+        head.addView(txt(L.s("Ƙara matsayi", "Add status"), 20f, C.TEXT).apply { setPadding(dp(14), 0, 0, 0) })
+        root.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        fun action(ic: Int, label: String, go: () -> Unit): View {
+            val c = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setOnClickListener { go() }
+            }
+            val b = ImageView(this)
+            b.setImageResource(ic)
+            b.setColorFilter(C.TEXT)
+            b.setPadding(dp(18), dp(18), dp(18), dp(18))
+            b.background = round(C.CARD, 32)
+            c.addView(b, LinearLayout.LayoutParams(dp(64), dp(64)))
+            c.addView(txt(label, 14f, C.TEXT).apply { setPadding(0, dp(6), 0, 0) })
+            return c
+        }
+        val acts = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(12), dp(6), dp(12), dp(10))
+        }
+        acts.addView(action(R.drawable.ic_edit, L.s("Rubutu", "Text")) {
+            d.dismiss()
+            composeText()
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        acts.addView(action(R.drawable.ic_music, L.s("Kiɗa", "Music")) {
+            d.dismiss()
+            composeText()
+            pickAudio()
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        acts.addView(action(R.drawable.ic_gallery, "Gallery") {
+            d.dismiss()
+            pickImage(21)
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        acts.addView(action(R.drawable.ic_mic, L.s("Murya", "Voice")) { soon() }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        root.addView(acts, LinearLayout.LayoutParams(MATCH, WRAP))
+        root.addView(txt("Recents", 16f, C.SUB, true).apply { setPadding(dp(16), dp(6), dp(16), dp(8)) })
+
+        val sv = ScrollView(this)
+        val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        sv.addView(grid, FrameLayout.LayoutParams(MATCH, WRAP))
+        root.addView(sv, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        if (checkSelfPermission(imagePerm()) != PackageManager.PERMISSION_GRANTED) {
+            val ask = pill(L.s("Ba da izinin ganin hotuna", "Allow photos"), C.LIME, C.FOREST) {
+                d.dismiss()
+                requestPermissions(arrayOf(imagePerm()), 4)
+            }
+            grid.addView(ask, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(dp(24), dp(20), dp(24), dp(20)) })
+        } else {
+            val side = resources.displayMetrics.widthPixels / 3
+            val uris = ArrayList<Uri?>()
+            uris.add(null)
+            uris.addAll(recentImages(59))
+            val views = ArrayList<ImageView>()
+            var rowL: LinearLayout? = null
+            for (i in uris.indices) {
+                if (i % 3 == 0) {
+                    rowL = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                    grid.addView(rowL, LinearLayout.LayoutParams(MATCH, side))
+                }
+                val u = uris[i]
+                val cell = FrameLayout(this)
+                cell.setPadding(dp(1), dp(1), dp(1), dp(1))
+                if (u == null) {
+                    cell.setBackgroundColor(C.CARD)
+                    val ic = ImageView(this)
+                    ic.setImageResource(R.drawable.ic_camera)
+                    ic.setColorFilter(C.ACCENT)
+                    ic.setPadding(dp(36), dp(36), dp(36), dp(36))
+                    cell.addView(ic, FrameLayout.LayoutParams(MATCH, MATCH))
+                    cell.setOnClickListener {
+                        d.dismiss()
+                        takePhoto(22)
+                    }
+                } else {
+                    val iv = ImageView(this)
+                    iv.scaleType = ImageView.ScaleType.CENTER_CROP
+                    iv.setBackgroundColor(C.CARD)
+                    cell.addView(iv, FrameLayout.LayoutParams(MATCH, MATCH))
+                    views.add(iv)
+                    cell.setOnClickListener {
+                        d.dismiss()
+                        statusImageUri(u)
+                    }
+                }
+                rowL?.addView(cell, LinearLayout.LayoutParams(0, MATCH, 1f))
+            }
+            val real = uris.filterNotNull()
+            Thread {
+                for (k in real.indices) {
+                    val bmp = thumbOf(real[k], 260)
+                    if (bmp != null) handler.post { if (d.isShowing) views[k].setImageBitmap(bmp) }
+                }
+            }.start()
+        }
+        d.setContentView(root)
+        d.show()
+        d.window?.setLayout(MATCH, MATCH)
     }
 
     // ----- making a status -----
@@ -2442,6 +2647,10 @@ class MainActivity : Activity(), NetListener {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 2) {
             toast(L.s("Yanzu riƙe mic ɗin don yin rikodi.", "Now hold the mic button to record."))
+            return
+        }
+        if (requestCode == 4) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) showAddStatusSheet()
             return
         }
         if (hasPerms()) {
