@@ -54,7 +54,7 @@ object Num {
     }
 }
 
-class Net(private val ctx: Context, private val store: Store, private val ui: NetListener) {
+class Net(private val ctx: Context, private val store: Store, var ui: NetListener) {
 
     private val SERVICE_ID = "com.mukhsapp.app.v1"
     private val client: ConnectionsClient = Nearby.getConnectionsClient(ctx)
@@ -525,6 +525,7 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
             store.savePeer(h, p.second)
             store.touchSeen(h)
             ui.onChanged()
+            autoConnect(endpointId, h)
         }
 
         override fun onEndpointLost(endpointId: String) {
@@ -533,6 +534,26 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
             ui.onChanged()
         }
     }
+
+    // Everyone nearby who is in my contacts is connected automatically.
+    // Only one of the two phones asks first (the smaller code), the other waits a bit,
+    // so both do not ask at the same moment.
+    private fun autoConnect(endpointId: String, h: String, tries: Int = 0) {
+        if (!autoOn) return
+        val wait = if (myHash < h) 400L else 5000L
+        handler.postDelayed({
+            if (nearby[endpointId] == h && !isConnected(h) && pendingConn.values.none { it.first == h }) {
+                client.requestConnection(advName(), endpointId, connCallback)
+                    .addOnFailureListener {
+                        if (tries < 4) {
+                            handler.postDelayed({ autoConnect(endpointId, h, tries + 1) }, 4000L)
+                        }
+                    }
+            }
+        }, wait)
+    }
+
+    var autoOn = true
 
     private val connCallback = object : ConnectionLifecycleCallback() {
         override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
@@ -569,8 +590,10 @@ class Net(private val ctx: Context, private val store: Store, private val ui: Ne
                     ui.onChanged()
                 }
             } else {
-                openAfterConnect = null
-                ui.onNotice(L.s("Haɗawa ta kasa. Gwada kuma.", "Connection failed. Try again."))
+                if (openAfterConnect != null) {
+                    openAfterConnect = null
+                    ui.onNotice(L.s("Haɗawa ta kasa. Gwada kuma.", "Connection failed. Try again."))
+                }
             }
         }
 

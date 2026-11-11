@@ -40,7 +40,7 @@ object Sounds {
 
 // Notification shown when a message arrives while the app is not on screen.
 object Notifier {
-    private const val CH = "messages"
+    private const val CH = "messages2"
 
     private fun soundUri(ctx: Context): Uri =
         Uri.parse("android.resource://" + ctx.packageName + "/" + R.raw.msg_received)
@@ -50,6 +50,10 @@ object Notifier {
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
         if (nm.getNotificationChannel(CH) != null) return
         val ch = NotificationChannel(CH, "Messages", NotificationManager.IMPORTANCE_HIGH)
+        ch.enableVibration(true)
+        ch.vibrationPattern = longArrayOf(0, 250, 120, 250)
+        ch.lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        ch.enableLights(true)
         ch.setSound(
             soundUri(ctx),
             AudioAttributes.Builder()
@@ -74,19 +78,39 @@ object Notifier {
             val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
             val intent = Intent(ctx, MainActivity::class.java)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            intent.putExtra("peer", key)
             val pi = PendingIntent.getActivity(
-                ctx, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                ctx, key.hashCode(), intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
             val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(ctx, CH)
             else Notification.Builder(ctx)
             b.setContentTitle(title)
             b.setContentText(text)
+            b.setStyle(Notification.BigTextStyle().bigText(text))
             b.setSmallIcon(R.drawable.ic_notif)
+            b.setColor(0xFFC6F135.toInt())
+            b.setCategory(Notification.CATEGORY_MESSAGE)
+            b.setVisibility(Notification.VISIBILITY_PUBLIC)
+            b.setWhen(System.currentTimeMillis())
+            b.setShowWhen(true)
+            var big: android.graphics.Bitmap? = Profile.bitmap(ctx, key)
+            if (big == null) {
+                try {
+                    val o = android.graphics.BitmapFactory.Options()
+                    o.inSampleSize = 4
+                    big = android.graphics.BitmapFactory.decodeResource(ctx.resources, R.drawable.logo_full, o)
+                } catch (e: Throwable) {
+                    big = null
+                }
+            }
+            if (big != null) b.setLargeIcon(big)
             b.setAutoCancel(true)
             b.setContentIntent(pi)
             if (Build.VERSION.SDK_INT < 26) {
                 b.setSound(soundUri(ctx))
                 b.setPriority(Notification.PRIORITY_HIGH)
+                b.setVibrate(longArrayOf(0, 250, 120, 250))
+                b.setDefaults(Notification.DEFAULT_LIGHTS)
             }
             nm.notify(key.hashCode(), b.build())
         } catch (e: Exception) {

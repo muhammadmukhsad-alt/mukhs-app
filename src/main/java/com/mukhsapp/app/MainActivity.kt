@@ -175,9 +175,19 @@ class MainActivity : Activity(), NetListener {
         applyTheme()
         Sounds.init(this)
         Notifier.ensureChannel(this)
-        store = Store(this)
-        net = Net(this, store, this)
+        store = Hub.store(this)
+        net = Hub.net(this)
+        Hub.screen = this
+        pendingPeer = intent?.getStringExtra("peer")
         showSplash()
+    }
+
+    private var pendingPeer: String? = null
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        val p = intent?.getStringExtra("peer") ?: return
+        if (screen >= 1) showChat(p) else pendingPeer = p
     }
 
     override fun onPause() {
@@ -200,7 +210,8 @@ class MainActivity : Activity(), NetListener {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
-        net.stopAll()
+        net.foreground = false
+        if (Hub.screen === this) Hub.screen = null
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -633,6 +644,11 @@ class MainActivity : Activity(), NetListener {
         } else {
             applyIdentity()
             showHome()
+            val pp = pendingPeer
+            if (pp != null) {
+                pendingPeer = null
+                showChat(pp)
+            }
         }
     }
 
@@ -2656,6 +2672,8 @@ class MainActivity : Activity(), NetListener {
         if (hasPerms()) {
             net.loadContacts()
             net.start()
+            MukhsService.start(this)
+            askBatteryOnce()
         } else {
             toast(
                 L.s(
@@ -2671,9 +2689,27 @@ class MainActivity : Activity(), NetListener {
         if (hasPerms()) {
             if (net.contacts.isEmpty()) net.loadContacts()
             net.start()
+            MukhsService.start(this)
+            askBatteryOnce()
         } else if (!askedPerms) {
             askedPerms = true
             askForPerms()
+        }
+    }
+
+    // asks once to let MukhsApp run in the background (phones like Tecno/Infinix close apps otherwise)
+    private fun askBatteryOnce() {
+        if (prefs().getBoolean("batteryAsked", false)) return
+        prefs().edit().putBoolean("batteryAsked", true).apply()
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                val i = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                i.data = Uri.parse("package:$packageName")
+                startActivity(i)
+            }
+        } catch (e: Exception) {
+            // not available on this phone
         }
     }
 
@@ -2955,6 +2991,10 @@ class MainActivity : Activity(), NetListener {
         handler.postDelayed(hideUndo, 6000)
     }
 
+    // the doodle wallpaper: faint white pictures on the dark theme, faint green on the light theme
+    private fun chatWallpaper(): android.graphics.drawable.Drawable =
+        Doodle.make(this, C.BG, if (C.dark) 0x18FFFFFF else 0x2A2E7D32)
+
     private fun showChat(h: String) {
         screen = 2
         currentChat = h
@@ -2970,7 +3010,7 @@ class MainActivity : Activity(), NetListener {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(C.BG)
+            background = chatWallpaper()
         }
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
