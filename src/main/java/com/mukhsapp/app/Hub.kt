@@ -57,6 +57,8 @@ object Hub {
         else if (m.kind == "d") "📄 " + m.body
         else m.body
 
+    fun app(): Context? = appCtx
+
     @Synchronized
     fun store(ctx: Context): Store {
         appCtx = ctx.applicationContext

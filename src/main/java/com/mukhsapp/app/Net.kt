@@ -155,6 +155,22 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
         ui.onChanged()
     }
 
+    // ---------- calls ----------
+
+    fun sendBytes(h: String, b: ByteArray) {
+        val ep = endpointOfConnected(h) ?: return
+        try {
+            client.sendPayload(ep, Payload.fromBytes(b))
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    fun sendSignal(h: String, j: JSONObject) {
+        val ep = endpointOfConnected(h) ?: return
+        send(ep, j)
+    }
+
     fun stopAll() {
         client.stopAllEndpoints()
     }
@@ -392,6 +408,10 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
 
     private fun handle(h: String, ep: String, j: JSONObject) {
         val type = j.optString("t")
+        if (type == "cv" || type == "cy" || type == "cn") {
+            Calls.onSignal(h, j)
+            return
+        }
         if (type == "m") {
             val uid = j.optString("id")
             val body = j.optString("b")
@@ -496,6 +516,11 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
             val h = connected[endpointId] ?: pendingConn[endpointId]?.first ?: return
             if (payload.type != Payload.Type.BYTES) return
             val bytes = payload.asBytes() ?: return
+            // call sound and video frames start with a small number, messages start with {
+            if (bytes.size > 1 && bytes[0].toInt() in 1..9) {
+                Calls.onFrame(h, bytes)
+                return
+            }
             try {
                 handle(h, endpointId, JSONObject(String(bytes, Charsets.UTF_8)))
             } catch (e: Exception) {
@@ -600,7 +625,10 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
         override fun onDisconnected(endpointId: String) {
             val h = connected.remove(endpointId)
             nearby.remove(endpointId)
-            if (h != null) store.touchSeen(h)
+            if (h != null) {
+                store.touchSeen(h)
+                Calls.onPeerLost(h)
+            }
             ui.onChanged()
             if (searching) {
                 // look again so the person can be found and reconnected

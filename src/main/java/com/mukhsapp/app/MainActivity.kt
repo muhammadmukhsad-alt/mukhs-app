@@ -178,6 +178,7 @@ class MainActivity : Activity(), NetListener {
         store = Hub.store(this)
         net = Hub.net(this)
         Hub.screen = this
+        Calls.ui = callUi
         pendingPeer = intent?.getStringExtra("peer")
         showSplash()
     }
@@ -202,6 +203,10 @@ class MainActivity : Activity(), NetListener {
     override fun onResume() {
         super.onResume()
         net.foreground = true
+        if (Calls.state != Calls.IDLE && screen >= 1 && screen != 8) {
+            showCall()
+            return
+        }
         val h = currentChat
         if (screen == 2 && h != null) showChat(h)
         if (screen == 6 && viewerList.isNotEmpty()) showViewer()
@@ -212,6 +217,7 @@ class MainActivity : Activity(), NetListener {
         handler.removeCallbacksAndMessages(null)
         net.foreground = false
         if (Hub.screen === this) Hub.screen = null
+        if (Calls.ui === callUi) Calls.ui = null
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -226,6 +232,8 @@ class MainActivity : Activity(), NetListener {
     override fun onBackPressed() {
         if (screen == 2 && selected.isNotEmpty()) {
             clearSelection()
+        } else if (screen == 8) {
+            moveTaskToBack(true)
         } else if (screen == 6) {
             closeViewer()
         } else if (screen == 7) {
@@ -361,6 +369,255 @@ class MainActivity : Activity(), NetListener {
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
+
+    // ---------- calls ----------
+
+    private var pendingCallAction: (() -> Unit)? = null
+    private var callStatus: TextView? = null
+    private var callRemote: ImageView? = null
+    private var callLocal: ImageView? = null
+    private var callBar: LinearLayout? = null
+    private var callAvatarBox: View? = null
+    private var callShown = -1
+
+    private val callUi = object : CallUi {
+        override fun onCallChanged() {
+            handler.post { onCallState() }
+        }
+
+        override fun onRemoteFrame(b: Bitmap) {
+            callRemote?.setImageBitmap(b)
+            callAvatarBox?.visibility = View.GONE
+        }
+
+        override fun onLocalFrame(b: Bitmap) {
+            handler.post { callLocal?.setImageBitmap(b) }
+        }
+    }
+
+    private val callTick = object : Runnable {
+        override fun run() {
+            updateCallStatus()
+            if (screen == 8 && Calls.state != Calls.IDLE) handler.postDelayed(this, 1000)
+        }
+    }
+
+    private fun onCallState() {
+        if (Calls.state == Calls.IDLE) {
+            if (screen == 8) {
+                if (Build.VERSION.SDK_INT >= 27) {
+                    setShowWhenLocked(false)
+                    setTurnScreenOn(false)
+                }
+                showHome()
+            }
+            return
+        }
+        if (screen != 8) showCall() else {
+            buildCallBar()
+            updateCallStatus()
+        }
+    }
+
+    private fun ensureCallPerms(vid: Boolean, then: () -> Unit) {
+        val need = ArrayList<String>()
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            need.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (vid && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            need.add(Manifest.permission.CAMERA)
+        }
+        if (need.isEmpty()) {
+            then()
+        } else {
+            pendingCallAction = then
+            requestPermissions(need.toTypedArray(), 5)
+        }
+    }
+
+    private fun startCall(h: String, vid: Boolean) {
+        if (Calls.state != Calls.IDLE) {
+            showCall()
+            return
+        }
+        if (!net.isConnected(h)) {
+            toast(L.s("Ba a haɗe da shi ba tukuna. Jira kaɗan ya bayyana a Nearby.", "Not connected to them yet. Wait a moment."))
+            return
+        }
+        ensureCallPerms(vid) {
+            if (Calls.dial(this, h, vid)) showCall()
+        }
+    }
+
+    private fun callBtn(ic: Int, bg: Int, on: Boolean = false, rotate: Float = 0f, go: () -> Unit): View {
+        val f = FrameLayout(this)
+        f.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(if (on) Color.WHITE else bg)
+        }
+        val i = ImageView(this)
+        i.setImageResource(ic)
+        i.setColorFilter(if (on) Color.BLACK else Color.WHITE)
+        i.rotation = rotate
+        i.setPadding(dp(18), dp(18), dp(18), dp(18))
+        f.addView(i, FrameLayout.LayoutParams(dp(64), dp(64)))
+        f.setOnClickListener { go() }
+        return f
+    }
+
+    private fun buildCallBar() {
+        val bar = callBar ?: return
+        bar.removeAllViews()
+        val red = Color.parseColor("#E53935")
+        val green = Color.parseColor("#2E9E5B")
+        val grey = Color.parseColor("#33FFFFFF")
+        fun add(v: View) = bar.addView(v, LinearLayout.LayoutParams(WRAP, WRAP).apply {
+            leftMargin = dp(16)
+            rightMargin = dp(16)
+        })
+        if (Calls.state == Calls.IN) {
+            add(callBtn(R.drawable.ic_call, red, false, 135f) { Calls.hangup(this) })
+            add(callBtn(if (Calls.video) R.drawable.ic_videocam else R.drawable.ic_call, green) {
+                ensureCallPerms(Calls.video) { Calls.accept(this) }
+            })
+        } else {
+            if (Calls.state == Calls.LIVE) {
+                add(callBtn(if (Calls.muted) R.drawable.ic_mic_off else R.drawable.ic_mic, grey, Calls.muted) {
+                    Calls.muted = !Calls.muted
+                    buildCallBar()
+                })
+            }
+            add(callBtn(R.drawable.ic_speaker, grey, Calls.speaker) {
+                Calls.setSpeaker(this, !Calls.speaker)
+                buildCallBar()
+            })
+            add(callBtn(R.drawable.ic_call, red, false, 135f) { Calls.hangup(this) })
+        }
+    }
+
+    private fun updateCallStatus() {
+        val t = callStatus ?: return
+        t.text = when (Calls.state) {
+            Calls.IN -> if (Calls.video) L.s("Kiran bidiyo ya shigo…", "Incoming video call…") else L.s("Kiran murya ya shigo…", "Incoming voice call…")
+            Calls.OUT -> L.s("Ana kira…", "Calling…")
+            Calls.LIVE -> {
+                val sec = ((System.currentTimeMillis() - Calls.startedAt) / 1000).toInt()
+                String.format("%d:%02d", sec / 60, sec % 60)
+            }
+            else -> ""
+        }
+    }
+
+    private fun showCall() {
+        screen = 8
+        currentChat = null
+        net.activeChat = null
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        window.statusBarColor = Color.parseColor("#06261A")
+        window.navigationBarColor = Color.parseColor("#06261A")
+        window.decorView.systemUiVisibility = 0
+        val h = Calls.peer
+        val root = FrameLayout(this)
+        root.background = Doodle.make(this, Color.parseColor("#072A1C"), 0x26FFFFFF)
+
+        val remote = ImageView(this)
+        remote.scaleType = ImageView.ScaleType.CENTER_CROP
+        callRemote = remote
+        root.addView(remote, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        val av = FrameLayout(this)
+        av.addView(avatar(net.nameOf(h), 130, false, h))
+        callAvatarBox = av
+        val name = txt(net.nameOf(h), 26f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            setShadowLayer(8f, 0f, 2f, Color.BLACK)
+        }
+        val st = txt("", 16f, Color.parseColor("#E6FFFFFF")).apply {
+            gravity = Gravity.CENTER
+            setShadowLayer(8f, 0f, 2f, Color.BLACK)
+        }
+        callStatus = st
+        box.addView(name, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(70) })
+        box.addView(st, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(4) })
+        box.addView(av, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(36) })
+        root.addView(box, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP))
+
+        if (Calls.video) {
+            val loc = ImageView(this)
+            loc.scaleType = ImageView.ScaleType.CENTER_CROP
+            loc.background = round(Color.parseColor("#55000000"), 12)
+            loc.clipToOutline = true
+            callLocal = loc
+            root.addView(
+                loc,
+                FrameLayout.LayoutParams(dp(100), dp(140), Gravity.TOP or Gravity.END).apply {
+                    topMargin = dp(40)
+                    rightMargin = dp(14)
+                }
+            )
+        } else {
+            callLocal = null
+        }
+
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        callBar = bar
+        root.addView(bar, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM).apply { bottomMargin = dp(48) })
+        buildCallBar()
+        updateCallStatus()
+        setContentView(root)
+        handler.removeCallbacks(callTick)
+        handler.post(callTick)
+    }
+
+    // the list of calls (the Calls tab)
+    private fun callsView(): View {
+        val sv = ScrollView(this)
+        sv.setBackgroundColor(C.BG)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        sv.addView(box, FrameLayout.LayoutParams(MATCH, WRAP))
+        val log = Calls.history(this)
+        if (log.isEmpty()) {
+            box.addView(
+                txt(L.s("Babu kira tukuna. Ka buɗe chat ka danna alamar waya.", "No calls yet. Open a chat and tap the phone icon."), 15f, C.SUB).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(dp(32), dp(60), dp(32), 0)
+                },
+                LinearLayout.LayoutParams(MATCH, WRAP)
+            )
+            return sv
+        }
+        val fmt = java.text.SimpleDateFormat("d MMM, h:mm a", java.util.Locale.getDefault())
+        for (e in log) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+            }
+            row.addView(avatar(net.nameOf(e.h), 46, false, e.h))
+            val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            mid.addView(txt(net.nameOf(e.h), 17f, if (e.result == "missed") Color.parseColor("#E53935") else C.TEXT, true))
+            val arrow = if (e.incoming) "↙ " else "↗ "
+            val how = if (e.result == "missed") L.s("Ba a ɗauka ba", "Missed") else if (e.dur > 0) String.format("%d:%02d", e.dur / 60, e.dur % 60) else
+                if (e.incoming) L.s("An ƙi", "Declined") else L.s("Ba a amsa ba", "No answer")
+            mid.addView(txt(arrow + fmt.format(java.util.Date(e.ts)) + "  ·  " + how, 13f, C.SUB))
+            row.addView(mid, LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dp(12) })
+            row.addView(icon(if (e.video) R.drawable.ic_videocam else R.drawable.ic_call, 24, C.ACCENT) { startCall(e.h, e.video) })
+            box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+        }
+        return sv
+    }
 
     private fun soon() = toast(L.s("Zai zo nan ba da daɗewa ba.", "Coming soon."))
 
@@ -649,6 +906,7 @@ class MainActivity : Activity(), NetListener {
                 pendingPeer = null
                 showChat(pp)
             }
+            if (Calls.state != Calls.IDLE) showCall()
         }
     }
 
@@ -1002,7 +1260,7 @@ class MainActivity : Activity(), NetListener {
         val fc = content ?: return
         fc.removeAllViews()
         chatListBox = null
-        val v: View = if (tab == 0) chatsView() else if (tab == 1) statusView() else if (tab == 2) nearbyView() else placeholder(tab)
+        val v: View = if (tab == 0) chatsView() else if (tab == 1) statusView() else if (tab == 2) nearbyView() else if (tab == 4) callsView() else placeholder(tab)
         fc.addView(v, FrameLayout.LayoutParams(MATCH, MATCH))
         if (tab == 0) {
             val fab = ImageView(this)
@@ -1460,8 +1718,14 @@ class MainActivity : Activity(), NetListener {
             d.dismiss()
             openPeer(h)
         }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        actions.addView(icon(R.drawable.ic_call, 24, C.ACCENT) { soon() }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        actions.addView(icon(R.drawable.ic_videocam, 24, C.ACCENT) { soon() }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        actions.addView(icon(R.drawable.ic_call, 24, C.ACCENT) {
+            d.dismiss()
+            startCall(h, false)
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        actions.addView(icon(R.drawable.ic_videocam, 24, C.ACCENT) {
+            d.dismiss()
+            startCall(h, true)
+        }, LinearLayout.LayoutParams(0, WRAP, 1f))
         actions.addView(icon(R.drawable.ic_info, 24, C.ACCENT) {
             d.dismiss()
             viewContact(h)
@@ -2669,6 +2933,17 @@ class MainActivity : Activity(), NetListener {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) showAddStatusSheet()
             return
         }
+        if (requestCode == 5) {
+            val ok = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            val act = pendingCallAction
+            pendingCallAction = null
+            if (ok && act != null) act() else toast(L.s("Ana buƙatar izinin mic/camera don kira.", "Mic/camera permission is needed for calls."))
+            return
+        }
+        if (requestCode == 6) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) takePhoto(pendingPhotoCode)
+            return
+        }
         if (hasPerms()) {
             net.loadContacts()
             net.start()
@@ -3044,8 +3319,8 @@ class MainActivity : Activity(), NetListener {
         chatStatusView = st
         titleBox.addView(st)
         header.addView(titleBox, LinearLayout.LayoutParams(0, WRAP, 1f))
-        header.addView(icon(R.drawable.ic_videocam, 24, C.BAR_ICON) { soon() })
-        header.addView(icon(R.drawable.ic_call, 24, C.BAR_ICON) { soon() })
+        header.addView(icon(R.drawable.ic_videocam, 24, C.BAR_ICON) { startCall(h, true) })
+        header.addView(icon(R.drawable.ic_call, 24, C.BAR_ICON) { startCall(h, false) })
         header.addView(icon(R.drawable.ic_more_vert, 24, C.BAR_ICON) { v -> chatMenu(v, h) })
         root.addView(header, LinearLayout.LayoutParams(MATCH, WRAP))
 
@@ -3521,7 +3796,14 @@ class MainActivity : Activity(), NetListener {
         }
     }
 
+    private var pendingPhotoCode = 12
+
     private fun takePhoto(code: Int = 12) {
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            pendingPhotoCode = code
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), 6)
+            return
+        }
         if (Build.VERSION.SDK_INT < 29) {
             toast(L.s("Wannan wayar ba ta tallafa wa camera a nan tukuna. Yi amfani da Gallery.", "Camera is not supported on this Android version yet. Use Gallery."))
             return
