@@ -137,13 +137,14 @@ class MukhsService : Service() {
 
     companion object {
         private const val ID = 7001
-        private const val CH = "service"
+        private const val CH = "service2"
 
         private fun build(ctx: Context): Notification {
             val nm = ctx.getSystemService(NotificationManager::class.java)
             if (Build.VERSION.SDK_INT >= 26 && nm != null && nm.getNotificationChannel(CH) == null) {
-                val ch = NotificationChannel(CH, "MukhsApp is running", NotificationManager.IMPORTANCE_LOW)
+                val ch = NotificationChannel(CH, "MukhsApp is running", NotificationManager.IMPORTANCE_MIN)
                 ch.setShowBadge(false)
+                ch.lockscreenVisibility = Notification.VISIBILITY_SECRET
                 nm.createNotificationChannel(ch)
             }
             val intent = Intent(ctx, MainActivity::class.java)
@@ -161,6 +162,7 @@ class MukhsService : Service() {
             )
             b.setSmallIcon(R.drawable.ic_notif)
             b.setOngoing(true)
+            b.setVisibility(Notification.VISIBILITY_SECRET)
             b.setContentIntent(pi)
             return b.build()
         }

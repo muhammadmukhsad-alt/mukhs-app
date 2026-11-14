@@ -39,23 +39,32 @@ object Sounds {
 }
 
 // Notification shown when a message arrives while the app is not on screen.
+// Looks like the big apps: sender name + photo, the phone's own notification sound,
+// pops up on top of the screen, and several messages from one person stack together.
 object Notifier {
-    private const val CH = "messages2"
-
-    private fun soundUri(ctx: Context): Uri =
-        Uri.parse("android.resource://" + ctx.packageName + "/" + R.raw.msg_received)
+    private const val CH = "messages3"
+    private val lines = HashMap<String, ArrayList<Pair<String, Long>>>()
 
     fun ensureChannel(ctx: Context) {
         if (Build.VERSION.SDK_INT < 26) return
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+        try {
+            nm.deleteNotificationChannel("messages")
+            nm.deleteNotificationChannel("messages2")
+        } catch (e: Exception) {
+            // ignore
+        }
         if (nm.getNotificationChannel(CH) != null) return
-        val ch = NotificationChannel(CH, "Messages", NotificationManager.IMPORTANCE_HIGH)
+        val ch = NotificationChannel(CH, L.s("Saƙonni", "Messages"), NotificationManager.IMPORTANCE_HIGH)
+        ch.description = L.s("Sabbin saƙonni daga abokai", "New messages from your friends")
         ch.enableVibration(true)
-        ch.vibrationPattern = longArrayOf(0, 250, 120, 250)
-        ch.lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        ch.vibrationPattern = longArrayOf(0, 300, 150, 300)
+        ch.lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         ch.enableLights(true)
+        ch.lightColor = 0xFFE6FF61.toInt()
+        ch.setShowBadge(true)
         ch.setSound(
-            soundUri(ctx),
+            android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION),
             AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_NOTIFICATION)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
@@ -64,7 +73,19 @@ object Notifier {
         nm.createNotificationChannel(ch)
     }
 
+    fun enabled(ctx: Context): Boolean = try {
+        androidx_enabled(ctx)
+    } catch (e: Exception) {
+        true
+    }
+
+    private fun androidx_enabled(ctx: Context): Boolean {
+        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return true
+        return nm.areNotificationsEnabled()
+    }
+
     fun cancel(ctx: Context, key: String) {
+        lines.remove(key)
         try {
             ctx.getSystemService(NotificationManager::class.java)?.cancel(key.hashCode())
         } catch (e: Exception) {
@@ -82,17 +103,24 @@ object Notifier {
             val pi = PendingIntent.getActivity(
                 ctx, key.hashCode(), intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
-            val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(ctx, CH)
-            else Notification.Builder(ctx)
+            val now = System.currentTimeMillis()
+            val list = lines.getOrPut(key) { ArrayList() }
+            list.add(Pair(text, now))
+            while (list.size > 7) list.removeAt(0)
+
+            val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(ctx, CH) else Notification.Builder(ctx)
             b.setContentTitle(title)
             b.setContentText(text)
-            b.setStyle(Notification.BigTextStyle().bigText(text))
             b.setSmallIcon(R.drawable.ic_notif)
-            b.setColor(0xFFC6F135.toInt())
+            b.setColor(0xFF004538.toInt())
             b.setCategory(Notification.CATEGORY_MESSAGE)
-            b.setVisibility(Notification.VISIBILITY_PUBLIC)
-            b.setWhen(System.currentTimeMillis())
+            b.setVisibility(Notification.VISIBILITY_PRIVATE)
+            b.setWhen(now)
             b.setShowWhen(true)
+            b.setNumber(list.size)
+            b.setOnlyAlertOnce(false)
+            b.setGroup("mukhs_msgs")
+
             var big: android.graphics.Bitmap? = Profile.bitmap(ctx, key)
             if (big == null) {
                 try {
@@ -104,13 +132,25 @@ object Notifier {
                 }
             }
             if (big != null) b.setLargeIcon(big)
+
+            if (Build.VERSION.SDK_INT >= 28) {
+                val pb = android.app.Person.Builder().setName(title).setKey(key)
+                if (big != null) pb.setIcon(android.graphics.drawable.Icon.createWithBitmap(big))
+                val who = pb.build()
+                val st = Notification.MessagingStyle(android.app.Person.Builder().setName(L.s("Ni", "Me")).build())
+                for (l in list) st.addMessage(l.first, l.second, who)
+                b.setStyle(st)
+            } else {
+                val ib = Notification.InboxStyle()
+                for (l in list) ib.addLine(l.first)
+                ib.setBigContentTitle(title)
+                b.setStyle(ib)
+            }
             b.setAutoCancel(true)
             b.setContentIntent(pi)
+            b.setDefaults(Notification.DEFAULT_ALL)
             if (Build.VERSION.SDK_INT < 26) {
-                b.setSound(soundUri(ctx))
                 b.setPriority(Notification.PRIORITY_HIGH)
-                b.setVibrate(longArrayOf(0, 250, 120, 250))
-                b.setDefaults(Notification.DEFAULT_LIGHTS)
             }
             nm.notify(key.hashCode(), b.build())
         } catch (e: Exception) {

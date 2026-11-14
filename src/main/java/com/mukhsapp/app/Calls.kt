@@ -79,6 +79,10 @@ object Calls {
     private val queue = ArrayBlockingQueue<ShortArray>(20)
     private var camera: Camera? = null
     private var lastVideo = 0L
+    @Volatile private var awaitingAck = false
+    private var ackSince = 0L
+    private var ctxRef: Context? = null
+    private var camThread: android.os.HandlerThread? = null
     private val decoding = AtomicBoolean(false)
     private val pool = Executors.newSingleThreadExecutor()
     private const val NOTIF = 7003
@@ -187,6 +191,26 @@ object Calls {
         cancelNotice(ctx)
         val dur = if (state == LIVE) ((System.currentTimeMillis() - startedAt) / 1000).toInt() else 0
         addLog(ctx, CallEntry(peer, System.currentTimeMillis(), incoming, video, result, dur))
+        // also write it in the chat with that person ("Missed voice call - Tap to call back")
+        try {
+            val st = Hub.store(ctx)
+            val now = System.currentTimeMillis()
+            val body = result + "|" + (if (video) "v" else "a") + "|" + dur
+            val uid = "call-" + callId + (if (incoming) "-i" else "-o")
+            if (peer.isNotEmpty()) {
+                if (incoming) st.insertIn(peer, uid, body, now, result == "missed", "", false, "c", "", dur)
+                else st.insertOut(peer, uid, body, now, 1, "", false, "c", "", dur)
+            }
+        } catch (x: Throwable) {
+            // the list of calls still has it
+        }
+        if (incoming && result == "missed") {
+            try {
+                Notifier.message(ctx, Hub.net(ctx).nameOf(peer), if (video) "📹 " + L.s("Ba a ɗauki kiran bidiyo ba", "Missed video call") else "📞 " + L.s("Ba a ɗauki kiran murya ba", "Missed voice call"), peer)
+            } catch (x: Throwable) {
+                // ignore
+            }
+        }
         stopMedia(ctx)
         state = IDLE
         CallService.stop(ctx)
@@ -236,6 +260,7 @@ object Calls {
     }
 
     private fun startMedia(ctx: Context) {
+        ctxRef = ctx.applicationContext
         media = true
         queue.clear()
         try {
@@ -327,6 +352,12 @@ object Calls {
         }
         camera = null
         try {
+            camThread?.quitSafely()
+        } catch (e: Throwable) {
+            // ignore
+        }
+        camThread = null
+        try {
             val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
             am.isSpeakerphoneOn = false
             am.mode = AudioManager.MODE_NORMAL
@@ -337,6 +368,15 @@ object Calls {
 
     private fun startCamera(ctx: Context) {
         if (ctx.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
+        awaitingAck = false
+        // the camera works on its own thread so pictures keep flowing and the screen stays smooth
+        val th = android.os.HandlerThread("callcam")
+        th.start()
+        camThread = th
+        Handler(th.looper).post { openCamera(ctx) }
+    }
+
+    private fun openCamera(ctx: Context) {
         try {
             val info = Camera.CameraInfo()
             var id = 0
@@ -352,7 +392,7 @@ object Calls {
             val params = cam.parameters
             var best = params.supportedPreviewSizes[0]
             for (sz in params.supportedPreviewSizes) {
-                if (Math.abs(sz.width - 320) < Math.abs(best.width - 320)) best = sz
+                if (Math.abs(sz.width - 240) < Math.abs(best.width - 240)) best = sz
             }
             params.setPreviewSize(best.width, best.height)
             params.previewFormat = ImageFormat.NV21
@@ -365,11 +405,16 @@ object Calls {
             val net = Hub.net(ctx)
             cam.setPreviewCallback { data, _ ->
                 val now = System.currentTimeMillis()
-                if (media && now - lastVideo >= 120) {
+                // send the next picture only after the other phone has shown the last one
+                // (or after 1.5 s), so the video never falls behind the voice
+                if (awaitingAck && now - ackSince > 1500) awaitingAck = false
+                if (media && !awaitingAck && now - lastVideo >= 110) {
                     lastVideo = now
+                    awaitingAck = true
+                    ackSince = now
                     try {
                         val bos = ByteArrayOutputStream()
-                        YuvImage(data, ImageFormat.NV21, w, hh, null).compressToJpeg(Rect(0, 0, w, hh), 45, bos)
+                        YuvImage(data, ImageFormat.NV21, w, hh, null).compressToJpeg(Rect(0, 0, w, hh), 40, bos)
                         val jpg = bos.toByteArray()
                         val f = ByteArray(jpg.size + 2)
                         f[0] = 2
@@ -410,7 +455,11 @@ object Calls {
             val s = ShortArray(n)
             for (i in 0 until n) s[i] = ulaw2lin(b[i + 1])
             while (!queue.offer(s)) queue.poll()
+        } else if (kind == 3) {
+            awaitingAck = false
         } else if (kind == 2 && b.size > 4) {
+            // tell the sender this picture arrived, so it can send the next one
+            Hub.net(ctxRef ?: return).sendBytes(h, byteArrayOf(3))
             if (!decoding.compareAndSet(false, true)) return
             pool.execute {
                 try {

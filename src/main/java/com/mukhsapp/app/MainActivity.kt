@@ -48,6 +48,7 @@ import android.view.View
 import android.view.ViewOutlineProvider
 import android.view.Window
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -85,6 +86,7 @@ class MainActivity : Activity(), NetListener {
     private var navBar: LinearLayout? = null
     private var chatListBox: LinearLayout? = null
     private var chatQuery = ""
+    private var chatFilter = 0 // 0 All, 1 Unread, 2 Favourites, 3 Groups
     private var contactBox: LinearLayout? = null
     private var contactQuery = ""
     private var chatBox: LinearLayout? = null
@@ -409,7 +411,8 @@ class MainActivity : Activity(), NetListener {
                     setShowWhenLocked(false)
                     setTurnScreenOn(false)
                 }
-                showHome()
+                val back = Calls.peer
+                if (back.isNotEmpty()) showChat(back) else showHome()
             }
             return
         }
@@ -937,9 +940,9 @@ class MainActivity : Activity(), NetListener {
         if (requestCode == 11 && resultCode == RESULT_OK) {
             val clip = data?.clipData
             if (clip != null && clip.itemCount > 1) {
-                photoQueue.clear()
-                for (k in 0 until Math.min(clip.itemCount, 10)) photoQueue.add(clip.getItemAt(k).uri)
-                nextQueuedPhoto()
+                val uris = ArrayList<Uri>()
+                for (k in 0 until Math.min(clip.itemCount, 10)) uris.add(clip.getItemAt(k).uri)
+                sendImageUris(uris)
             } else {
                 val u = data?.data ?: clip?.getItemAt(0)?.uri
                 if (u != null) sendImageUri(u)
@@ -1504,6 +1507,37 @@ class MainActivity : Activity(), NetListener {
             setMargins(dp(12), dp(10), dp(12), dp(6))
         })
 
+        // filter chips: All / Unread / Favourites / Groups
+        val names = arrayOf(L.s("Duka", "All"), L.s("Ba a karanta ba", "Unread"), L.s("Abokan so", "Favourites"), L.s("Groups", "Groups"))
+        val chips = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(12), 0, dp(12), dp(4))
+        }
+        val chipViews = ArrayList<TextView>()
+        fun paint() {
+            for (i in chipViews.indices) {
+                val on = i == chatFilter
+                chipViews[i].background = round(if (on) C.NAV_PILL else C.INPUT, 18)
+                chipViews[i].setTextColor(if (on) C.TEXT else C.SUB)
+            }
+        }
+        for (i in names.indices) {
+            val c = txt(names[i], 14f, C.SUB, true)
+            c.setPadding(dp(14), dp(7), dp(14), dp(7))
+            c.setOnClickListener {
+                chatFilter = i
+                paint()
+                populateChats()
+            }
+            chipViews.add(c)
+            chips.addView(c, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(8) })
+        }
+        paint()
+        val hs = HorizontalScrollView(this)
+        hs.isHorizontalScrollBarEnabled = false
+        hs.addView(chips)
+        wrap.addView(hs, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(4) })
+
         val sv = ScrollView(this)
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1527,11 +1561,18 @@ class MainActivity : Activity(), NetListener {
                 net.nameOf(it.peer).lowercase().contains(q) || previewOf(it.last).lowercase().contains(q)
             }
         }
+        val favs = getSet("favs")
+        if (chatFilter == 1) list = list.filter { it.unread > 0 }
+        else if (chatFilter == 2) list = list.filter { favs.contains(it.peer) }
+        else if (chatFilter == 3) list = emptyList()
         list = list.sortedByDescending { pins.contains(it.peer) }
         if (list.isEmpty()) {
             box.addView(
                 txt(
-                    if (q.isNotEmpty()) L.s("Babu abin da aka samu.", "No results found.")
+                    if (chatFilter == 1) L.s("Babu saƙon da ba a karanta ba.", "No unread chats.")
+                    else if (chatFilter == 2) L.s("Babu abokan so tukuna. Dogon latsa chat ka zaɓi Add to favourites.", "No favourites yet. Long-press a chat and choose Add to favourites.")
+                    else if (chatFilter == 3) L.s("Babu groups tukuna.", "No groups yet.")
+                    else if (q.isNotEmpty()) L.s("Babu abin da aka samu.", "No results found.")
                     else L.s(
                         "Babu tattaunawa tukuna. Danna maɓallin kore ka zaɓi mutum, ko je tab ɗin Nearby.",
                         "No chats yet. Tap the green button to pick someone, or open the Nearby tab."
@@ -1626,6 +1667,7 @@ class MainActivity : Activity(), NetListener {
         val items = arrayOf(
             if (pinned) L.s("Cire pin", "Unpin chat") else L.s("Yi pin", "Pin chat"),
             if (muted) L.s("Buɗe sanarwa", "Unmute notifications") else L.s("Rufe sanarwa", "Mute notifications"),
+            if (getSet("favs").contains(h)) L.s("Cire daga abokan so", "Remove from favourites") else L.s("Ƙara cikin abokan so", "Add to favourites"),
             L.s("Share tattaunawa", "Delete chat")
         )
         dlg().setTitle(net.nameOf(h)).setItems(items) { _, which ->
@@ -1636,6 +1678,11 @@ class MainActivity : Activity(), NetListener {
                 populateChats()
             } else if (which == 1) {
                 toggleMute(h)
+                populateChats()
+            } else if (which == 2) {
+                val f = getSet("favs")
+                if (f.contains(h)) f.remove(h) else f.add(h)
+                putSet("favs", f)
                 populateChats()
             } else {
                 dlg()
@@ -2973,7 +3020,27 @@ class MainActivity : Activity(), NetListener {
     }
 
     // asks once to let MukhsApp run in the background (phones like Tecno/Infinix close apps otherwise)
+    private fun askNotificationsOn() {
+        if (Notifier.enabled(this) || prefs().getBoolean("notifAsked", false)) return
+        prefs().edit().putBoolean("notifAsked", true).apply()
+        android.app.AlertDialog.Builder(this)
+            .setTitle(L.s("Kunna sanarwa", "Turn on notifications"))
+            .setMessage(L.s("Don ka ga saƙonni da sunan mai aikawa da sauti ko da app a rufe, kunna Notifications.", "To get message alerts with the sender's name and sound even when the app is closed, turn on Notifications."))
+            .setPositiveButton(L.s("Buɗe saiti", "Open settings")) { _, _ ->
+                try {
+                    val i = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    i.putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+                    startActivity(i)
+                } catch (e: Exception) {
+                    // ignore
+                }
+            }
+            .setNegativeButton(L.s("Daga baya", "Later"), null)
+            .show()
+    }
+
     private fun askBatteryOnce() {
+        askNotificationsOn()
         if (prefs().getBoolean("batteryAsked", false)) return
         prefs().edit().putBoolean("batteryAsked", true).apply()
         try {
@@ -3278,6 +3345,9 @@ class MainActivity : Activity(), NetListener {
         clearChatState()
         replyTo = null
         lastDayKey = ""
+        lastAppended = null
+        lastRow = null
+        album = null
         net.markChatRead(h)
         Notifier.cancel(this, h)
         window.statusBarColor = C.BAR
@@ -3570,7 +3640,8 @@ class MainActivity : Activity(), NetListener {
     // ----- what a message looks like in lists and replies -----
 
     private fun previewOf(m: Msg): String =
-        if (m.kind == "a") L.s("Saƙon murya", "Voice message") + " (" + Media.fmtDur(m.dur) + ")"
+        if (m.kind == "c") callText(m)
+        else if (m.kind == "a") L.s("Saƙon murya", "Voice message") + " (" + Media.fmtDur(m.dur) + ")"
         else if (m.kind == "i") (if (captionOf(m).isEmpty()) L.s("Hoto", "Photo") else "📷 " + captionOf(m))
         else m.body
 
@@ -3741,21 +3812,19 @@ class MainActivity : Activity(), NetListener {
         if (screen == 2 && currentChat == h) appendMsg(m)
     }
 
-    private val photoQueue = ArrayList<Uri>()
+    private fun sendImageUri(uri: Uri) = sendImageUris(listOf(uri))
 
-    private fun nextQueuedPhoto() {
-        if (photoQueue.isEmpty() || screen != 2) return
-        val u = photoQueue.removeAt(0)
-        sendImageUri(u)
-    }
-
-    private fun sendImageUri(uri: Uri) {
+    private fun sendImageUris(uris: List<Uri>) {
         val h = currentChat ?: return
         Thread {
-            val f = Media.prepareImage(this, uri)
+            val made = ArrayList<File>()
+            for (u in uris) {
+                val f = Media.prepareImage(this, u)
+                if (f != null) made.add(f)
+            }
             handler.post {
-                if (f == null) toast(L.s("Ba a iya amfani da wannan hoton ba.", "Could not use that photo."))
-                else showSendPreview(h, f)
+                if (made.isEmpty()) toast(L.s("Ba a iya amfani da wannan hoton ba.", "Could not use that photo."))
+                else showSendPreview(h, made)
             }
         }.start()
     }
@@ -4134,9 +4203,17 @@ class MainActivity : Activity(), NetListener {
     }
 
     // after choosing or taking a photo: look at it, write a caption, draw / add text / turn it, then send
-    private fun showSendPreview(h: String, f: File) {
-        val bmp = Media.bitmapFor(f.path, 1280)
-        if (bmp == null) {
+    private class PrevItem(val file: File, var caption: String = "", var edited: Bitmap? = null)
+
+    // the page that opens before photos are sent: one or many pictures, each can be cropped,
+    // turned, drawn on, given text and its own caption, or removed from the list
+    private fun showSendPreview(h: String, files: List<File>) {
+        val items = ArrayList<PrevItem>()
+        for (f in files) items.add(PrevItem(f))
+        if (items.isEmpty()) return
+        var cur = 0
+        val first = Media.bitmapFor(items[0].file.path, 1280)
+        if (first == null) {
             toast(L.s("Ba a iya amfani da wannan hoton ba.", "Could not use that photo."))
             return
         }
@@ -4148,7 +4225,8 @@ class MainActivity : Activity(), NetListener {
             setBackgroundColor(Color.BLACK)
         }
         val ev = EditImageView(this)
-        ev.setBitmap(bmp)
+        ev.setBitmap(first)
+        val capIn = EditText(this)
 
         // colours for drawing and text
         val colors = intArrayOf(
@@ -4171,10 +4249,7 @@ class MainActivity : Activity(), NetListener {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(4), dp(4), dp(4), dp(4))
         }
-        topBar.addView(icon(R.drawable.ic_close, 24, Color.WHITE) {
-            photoQueue.clear()
-            d.dismiss()
-        })
+        topBar.addView(icon(R.drawable.ic_close, 24, Color.WHITE) { d.dismiss() })
         topBar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         val cropBtn = icon(R.drawable.ic_crop, 24, Color.WHITE) {}
         cropBtn.setOnClickListener {
@@ -4236,7 +4311,76 @@ class MainActivity : Activity(), NetListener {
 
         root.addView(ev, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
-        val capIn = EditText(this).apply {
+        // the little pictures at the bottom, each with a bin to take it out
+        val stripScroll = HorizontalScrollView(this)
+        stripScroll.isHorizontalScrollBarEnabled = false
+        val strip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+        }
+        stripScroll.addView(strip)
+        root.addView(stripScroll, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        fun commit() {
+            if (ev.cropMode) ev.applyCrop()
+            items[cur].caption = capIn.text.toString()
+            if (ev.isEdited()) items[cur].edited = ev.bake()
+        }
+
+        fun refreshStrip() {
+            strip.removeAllViews()
+            stripScroll.visibility = if (items.size > 1) View.VISIBLE else View.GONE
+            for (i in items.indices) {
+                val cell = FrameLayout(this)
+                val th = ImageView(this)
+                th.scaleType = ImageView.ScaleType.CENTER_CROP
+                val tb = items[i].edited ?: Media.bitmapFor(items[i].file.path, 160)
+                if (tb != null) th.setImageBitmap(tb)
+                th.background = GradientDrawable().apply {
+                    setColor(Color.DKGRAY)
+                    cornerRadius = dp(8).toFloat()
+                    setStroke(dp(if (i == cur) 3 else 0), C.LIME)
+                }
+                th.clipToOutline = true
+                cell.addView(th, FrameLayout.LayoutParams(dp(60), dp(60)))
+                val bin = ImageView(this)
+                bin.setImageResource(R.drawable.ic_delete)
+                bin.setColorFilter(Color.WHITE)
+                bin.setPadding(dp(3), dp(3), dp(3), dp(3))
+                bin.background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor("#CC000000"))
+                }
+                cell.addView(bin, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.TOP or Gravity.END))
+                th.setOnClickListener {
+                    if (i != cur) {
+                        commit()
+                        cur = i
+                        val nb = items[i].edited ?: Media.bitmapFor(items[i].file.path, 1280)
+                        if (nb != null) ev.loadFresh(nb)
+                        capIn.setText(items[i].caption)
+                        refreshStrip()
+                    }
+                }
+                bin.setOnClickListener {
+                    val gone = items.removeAt(i)
+                    gone.file.delete()
+                    if (items.isEmpty()) {
+                        d.dismiss()
+                    } else {
+                        if (cur >= i && cur > 0) cur -= 1
+                        val nb = items[cur].edited ?: Media.bitmapFor(items[cur].file.path, 1280)
+                        if (nb != null) ev.loadFresh(nb)
+                        capIn.setText(items[cur].caption)
+                        refreshStrip()
+                    }
+                }
+                strip.addView(cell, LinearLayout.LayoutParams(dp(60), dp(60)).apply { rightMargin = dp(8) })
+            }
+        }
+        refreshStrip()
+
+        capIn.apply {
             hint = L.s("Ƙara bayani...", "Add a caption...")
             setHintTextColor(Color.parseColor("#99FFFFFF"))
             setTextColor(Color.WHITE)
@@ -4257,8 +4401,7 @@ class MainActivity : Activity(), NetListener {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(6), dp(10), dp(10))
         }
-        val more = if (photoQueue.isEmpty()) "" else "  (+" + photoQueue.size + ")"
-        val who = txt(net.nameOf(h) + more, 15f, Color.WHITE).apply {
+        val who = txt(net.nameOf(h), 15f, Color.WHITE).apply {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
             background = round(Color.parseColor("#33FFFFFF"), 20)
@@ -4276,36 +4419,39 @@ class MainActivity : Activity(), NetListener {
         sendIc.setPadding(dp(13), dp(13), dp(13), dp(13))
         sendBtn.addView(sendIc, FrameLayout.LayoutParams(dp(50), dp(50)))
         sendBtn.setOnClickListener {
+            commit()
             sent = true
-            val cap = capIn.text.toString().trim()
-            val name = if (cap.isEmpty()) "Photo" else cap
-            if (ev.cropMode) ev.applyCrop()
-            val edited = if (ev.isEdited()) ev.bake() else null
+            val list = ArrayList<PrevItem>(items)
             d.dismiss()
-            if (edited == null) {
-                sendMediaMessage(h, "i", f, name, 0)
-            } else {
-                Thread {
-                    val nf = Media.saveBitmap(this, edited)
-                    handler.post {
+            Thread {
+                for (it2 in list) {
+                    val cap = it2.caption.trim()
+                    val name = if (cap.isEmpty()) "Photo" else cap
+                    val eb = it2.edited
+                    var out = it2.file
+                    if (eb != null) {
+                        val nf = Media.saveBitmap(this, eb)
                         if (nf != null) {
-                            f.delete()
-                            sendMediaMessage(h, "i", nf, name, 0)
-                        } else {
-                            sendMediaMessage(h, "i", f, name, 0)
+                            it2.file.delete()
+                            out = nf
                         }
                     }
-                }.start()
-            }
+                    val fin = out
+                    handler.post { sendMediaMessage(h, "i", fin, name, 0) }
+                    try {
+                        Thread.sleep(150)
+                    } catch (e: Exception) {
+                        // ignore
+                    }
+                }
+            }.start()
         }
         bottom.addView(sendBtn, LinearLayout.LayoutParams(dp(50), dp(50)).apply { leftMargin = dp(8) })
         root.addView(bottom, LinearLayout.LayoutParams(MATCH, WRAP))
 
         d.setOnDismissListener {
-            if (!sent) f.delete()
-            handler.post { nextQueuedPhoto() }
+            if (!sent) for (it2 in items) it2.file.delete()
         }
-        d.setOnCancelListener { photoQueue.clear() }
         d.setContentView(root)
         d.show()
         d.window?.setLayout(MATCH, MATCH)
@@ -4343,10 +4489,88 @@ class MainActivity : Activity(), NetListener {
         box.addView(v, lp(8))
     }
 
+    // Gives the words exactly the width they need. Without this a bubble could end up narrower
+    // than its words, and the end of the message was cut off ("Good morning" showed as "Good").
+    private fun fitText(tv: TextView) {
+        val maxW = (resources.displayMetrics.widthPixels * 0.72).toInt()
+        val t = tv.text
+        if (t.isEmpty()) return
+        val sl = android.text.StaticLayout.Builder.obtain(t, 0, t.length, tv.paint, maxW).build()
+        var need = 0f
+        for (i in 0 until sl.lineCount) need = Math.max(need, sl.getLineWidth(i))
+        tv.layoutParams = LinearLayout.LayoutParams(Math.min(maxW, Math.ceil(need.toDouble()).toInt() + dp(3)), WRAP)
+    }
+
+    private fun callParts(m: Msg): Triple<String, Boolean, Int> {
+        val p = m.body.split("|")
+        return Triple(p.getOrElse(0) { "" }, p.getOrElse(1) { "a" } == "v", p.getOrElse(2) { "0" }.toIntOrNull() ?: 0)
+    }
+
+    private fun callText(m: Msg): String {
+        val (res, vid, _) = callParts(m)
+        val what = if (vid) L.s("kiran bidiyo", "video call") else L.s("kiran murya", "voice call")
+        val whatEn = if (vid) "video call" else "voice call"
+        return if (res == "missed") L.s("Ba a ɗauki $what ba", "Missed $whatEn")
+        else if (vid) L.s("Kiran bidiyo", "Video call") else L.s("Kiran murya", "Voice call")
+    }
+
+    // "Missed voice call - Tap to call back", the same as WhatsApp shows inside the chat
+    private fun addCallCard(m: Msg) {
+        val box = chatBox ?: return
+        val (res, vid, dur) = callParts(m)
+        val missed = res == "missed"
+        val bubble = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = round(if (m.mine) C.MINE else C.CARD, 16)
+            setPadding(dp(10), dp(10), dp(12), dp(8))
+        }
+        val ic = ImageView(this)
+        ic.setImageResource(if (vid) R.drawable.ic_videocam else R.drawable.ic_call)
+        ic.setColorFilter(if (missed) Color.parseColor("#E53935") else if (m.mine) C.FOREST else C.ACCENT)
+        ic.setPadding(dp(10), dp(10), dp(10), dp(10))
+        ic.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.parseColor("#22000000"))
+        }
+        bubble.addView(ic, LinearLayout.LayoutParams(dp(44), dp(44)))
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), 0, dp(14), 0)
+        }
+        col.addView(txt(callText(m), 16f, if (m.mine) C.FOREST else C.TEXT, true))
+        val sub = if (missed) L.s("Danna don sake kira", "Tap to call back")
+        else if (dur > 0) String.format("%d:%02d", dur / 60, dur % 60)
+        else if (m.mine) L.s("Ba a amsa ba", "No answer") else L.s("An ƙi", "Declined")
+        col.addView(txt(sub, 13f, if (m.mine) C.GREY_ON_LIME else C.SUB))
+        bubble.addView(col)
+        bubble.addView(txt(fmtTime(m.ts), 11f, if (m.mine) C.GREY_ON_LIME else C.SUB))
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = if (m.mine) Gravity.END else Gravity.START
+            setPadding(0, dp(3), 0, dp(3))
+        }
+        row.addView(bubble, LinearLayout.LayoutParams(WRAP, WRAP))
+        bubbles[m.id] = row
+        msgById[m.id] = m
+        row.setOnClickListener {
+            if (selected.isNotEmpty()) toggleSelect(m.id) else currentChat?.let { startCall(it, vid) }
+        }
+        row.setOnLongClickListener {
+            toggleSelect(m.id)
+            true
+        }
+        box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+        lastAppended = null
+        album = null
+        chatScroll?.post { chatScroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
     private fun appendMsg(m: Msg) {
         val box = chatBox ?: return
         val key = dayStart(m.ts).toString()
         if (key != lastDayKey) {
+            lastAppended = null
             lastDayKey = key
             val chip = txt(dayLabel(m.ts), 12f, C.SUB).apply {
                 gravity = Gravity.CENTER
@@ -4360,6 +4584,17 @@ class MainActivity : Activity(), NetListener {
                     topMargin = dp(10)
                 }
             )
+        }
+        if (m.kind == "c") {
+            addCallCard(m)
+            return
+        }
+        val before = lastAppended
+        if (m.kind == "i" && before != null && before.kind == "i" && before.mine == m.mine &&
+            Math.abs(m.ts - before.ts) < 40000 && m.quote.isEmpty()
+        ) {
+            addToAlbum(m)
+            return
         }
         val bubble = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -4393,18 +4628,20 @@ class MainActivity : Activity(), NetListener {
             qb.addView(qc, LinearLayout.LayoutParams(WRAP, WRAP))
             bubble.addView(qb, LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(4) })
         }
-        val limit = 600
+        val limit = 2000
         val long = m.body.length > limit
         val body = txt(if (long) m.body.substring(0, limit) + "…" else m.body, 16f, textColor).apply {
             maxWidth = (resources.displayMetrics.widthPixels * 0.72).toInt()
             setHorizontallyScrolling(false)
             setSingleLine(false)
         }
+        if (m.kind == "t") fitText(body)
         if (m.kind == "t") bubble.addView(body) else bubble.addView(mediaView(m, textColor))
         if (long && m.kind == "t") {
             val more = txt("Read more", 15f, if (m.mine) C.BLUE_ON_LIME else C.ACCENT, true)
             more.setOnClickListener {
                 body.text = m.body
+                fitText(body)
                 (more.parent as? LinearLayout)?.removeView(more)
             }
             bubble.addView(more)
@@ -4497,6 +4734,131 @@ class MainActivity : Activity(), NetListener {
             }
         }
         box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+        lastAppended = m
+        lastRow = row
+        album = null
         chatScroll?.post { chatScroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    // ----- several photos sent together are shown as one collage bubble -----
+
+    private class Album(val mine: Boolean, val msgs: ArrayList<Msg>)
+
+    private var album: Album? = null
+    private var lastAppended: Msg? = null
+    private var lastRow: View? = null
+
+    private fun addToAlbum(m: Msg) {
+        val box = chatBox ?: return
+        val prev = lastAppended ?: return
+        val al = album ?: Album(m.mine, arrayListOf(prev)).also { album = it }
+        al.msgs.add(m)
+        val old = lastRow
+        val idx = if (old != null) box.indexOfChild(old) else -1
+        if (old != null) box.removeView(old)
+        val row = buildAlbumRow(al)
+        if (idx >= 0) box.addView(row, idx, LinearLayout.LayoutParams(MATCH, WRAP))
+        else box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+        lastRow = row
+        lastAppended = m
+        chatScroll?.post { chatScroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun buildAlbumRow(al: Album): View {
+        val last = al.msgs[al.msgs.size - 1]
+        val mine = al.mine
+        val bubble = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = round(if (mine) C.MINE else C.CARD, 16)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        val total = dp(240)
+        val gap = dp(2)
+        val cell = (total - gap) / 2
+        val shown = Math.min(al.msgs.size, 4)
+        var line: LinearLayout? = null
+        for (i in 0 until shown) {
+            if (i % 2 == 0) {
+                line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                bubble.addView(line, LinearLayout.LayoutParams(WRAP, WRAP).apply { if (i > 0) topMargin = gap })
+            }
+            val msg = al.msgs[i]
+            val fl = FrameLayout(this)
+            val iv = ImageView(this)
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP
+            val bm = Media.bitmapFor(msg.path, 360)
+            if (bm != null) iv.setImageBitmap(bm)
+            iv.background = round(Color.parseColor("#22000000"), 10)
+            iv.outlineProvider = ViewOutlineProvider.BACKGROUND
+            iv.clipToOutline = true
+            fl.addView(iv, FrameLayout.LayoutParams(MATCH, MATCH))
+            if (i == 3 && al.msgs.size > 4) {
+                val more = txt("+" + (al.msgs.size - 3), 26f, Color.WHITE, true)
+                more.gravity = Gravity.CENTER
+                more.background = round(Color.parseColor("#88000000"), 10)
+                fl.addView(more, FrameLayout.LayoutParams(MATCH, MATCH))
+            }
+            fl.setOnClickListener {
+                if (selected.isNotEmpty()) toggleSelect(last.id) else showFullImage(msg)
+            }
+            fl.setOnLongClickListener {
+                toggleSelect(last.id)
+                true
+            }
+            val wide = if (shown == 3 && i == 2) total else cell
+            line!!.addView(fl, LinearLayout.LayoutParams(wide, cell).apply { if (wide == cell && i % 2 == 0 && shown > i + 1) rightMargin = gap })
+        }
+        var cap = ""
+        for (x in al.msgs) {
+            if (cap.isEmpty()) cap = captionOf(x)
+        }
+        if (cap.isNotEmpty()) {
+            bubble.addView(txt(cap, 16f, if (mine) C.FOREST else C.TEXT).apply {
+                maxWidth = total
+                setPadding(dp(8), dp(6), dp(8), 0)
+            })
+        }
+        val meta = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(2), dp(6), 0)
+        }
+        val rv = TextView(this)
+        rv.textSize = 15f
+        rv.text = last.react
+        rv.visibility = if (last.react.isEmpty()) View.GONE else View.VISIBLE
+        reactViews[last.uid] = rv
+        meta.addView(rv, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(6) })
+        val sv = txt("★", 11f, if (mine) C.GREY_ON_LIME else C.SUB)
+        sv.visibility = if (last.star) View.VISIBLE else View.GONE
+        sv.setPadding(0, 0, dp(4), 0)
+        starViews[last.id] = sv
+        meta.addView(sv)
+        meta.addView(txt(fmtTime(last.ts), 11f, if (mine) C.GREY_ON_LIME else C.SUB))
+        if (mine) {
+            val tv = tickView(last.state, true, 12f)
+            tv.setPadding(dp(4), 0, 0, 0)
+            meta.addView(tv)
+            tickViews[last.uid] = tv
+        }
+        bubble.addView(meta, LinearLayout.LayoutParams(WRAP, WRAP).apply { gravity = Gravity.END })
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = if (mine) Gravity.END else Gravity.START
+            setPadding(0, dp(3), 0, dp(3))
+        }
+        row.addView(bubble, LinearLayout.LayoutParams(WRAP, WRAP))
+        for (x in al.msgs) {
+            bubbles[x.id] = row
+            msgById[x.id] = x
+        }
+        row.setOnLongClickListener {
+            toggleSelect(last.id)
+            true
+        }
+        row.setOnClickListener {
+            if (selected.isNotEmpty()) toggleSelect(last.id)
+        }
+        return row
     }
 }

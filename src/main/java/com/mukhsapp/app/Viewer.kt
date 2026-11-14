@@ -250,6 +250,19 @@ class EditImageView(ctx: Context) : View(ctx) {
         invalidate()
     }
 
+    // show another picture with a clean slate (used when you switch between the pictures you will send)
+    fun loadFresh(b: Bitmap) {
+        strokes.clear()
+        texts.clear()
+        history.clear()
+        rotated = false
+        drawMode = false
+        cropMode = false
+        base = b
+        layoutMat()
+        invalidate()
+    }
+
     fun isEdited(): Boolean = rotated || history.isNotEmpty()
 
     private fun sideOf(b: Bitmap): Float = Math.max(b.width, b.height).toFloat()
