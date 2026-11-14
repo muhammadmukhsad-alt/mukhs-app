@@ -86,7 +86,6 @@ object Hub {
                 n.myHash = Num.hashOf(number)
             }
             netI = n
-            Mailbox.start(c, store(c), n)
         }
         return n
     }

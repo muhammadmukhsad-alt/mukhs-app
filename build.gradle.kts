@@ -11,11 +11,8 @@ android {
         applicationId = "com.mukhsapp.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 20
-        versionName = "0.20"
-        // GitHub mailbox: set MAILBOX_REPO / MAILBOX_TOKEN as GitHub Actions secrets. No token = mailbox off.
-        buildConfigField("String", "MAILBOX_REPO", "\"" + (System.getenv("MAILBOX_REPO")?.takeIf { it.isNotBlank() } ?: "muhammadmukhsad-alt/mukhs-mailbox") + "\"")
-        buildConfigField("String", "MAILBOX_TOKEN", "\"" + (System.getenv("MAILBOX_TOKEN")?.trim() ?: "") + "\"")
+        versionCode = 21
+        versionName = "0.21"
     }
 
     // The same debug key is used for every build, so a new APK installs over the old
@@ -27,10 +24,6 @@ android {
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
-    }
-
-    buildFeatures {
-        buildConfig = true
     }
 
     compileOptions {
