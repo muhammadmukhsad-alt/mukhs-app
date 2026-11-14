@@ -44,7 +44,7 @@ data class Convo(val peer: String, val last: Msg, val unread: Int)
 
 private const val COLS = "id, uid, mine, body, ts, state, react, star, quote, qmine, kind, path, dur"
 
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 7) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 8) {
 
     private fun create(db: SQLiteDatabase) {
         db.execSQL(
@@ -54,7 +54,16 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 7) {
                 "react TEXT DEFAULT '', star INTEGER DEFAULT 0, quote TEXT DEFAULT '', qmine INTEGER DEFAULT 0, " +
                 "kind TEXT DEFAULT 't', path TEXT DEFAULT '', dur INTEGER DEFAULT 0)"
         )
-        db.execSQL("CREATE TABLE peers(hash TEXT PRIMARY KEY, name TEXT, last_seen INTEGER DEFAULT 0, about TEXT DEFAULT '')")
+        db.execSQL("CREATE TABLE peers(hash TEXT PRIMARY KEY, name TEXT, last_seen INTEGER DEFAULT 0, about TEXT DEFAULT '', pub TEXT DEFAULT '')")
+    }
+
+    // envelopes I carry for other people (store-and-forward). done=1 means it reached its owner
+    // (kept without its content so I can tell other phones to forget it too).
+    private fun createRelay(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS relay(uid TEXT PRIMARY KEY, dst TEXT, ts INTEGER, exp INTEGER, " +
+                "hops INTEGER DEFAULT 0, blob TEXT DEFAULT '', done INTEGER DEFAULT 0)"
+        )
     }
 
     private fun createStatus(db: SQLiteDatabase) {
@@ -68,6 +77,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 7) {
     override fun onCreate(db: SQLiteDatabase) {
         create(db)
         createStatus(db)
+        createRelay(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -76,6 +86,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 7) {
             db.execSQL("DROP TABLE IF EXISTS peers")
             create(db)
             createStatus(db)
+            createRelay(db)
         } else {
             if (oldVersion < 3) db.execSQL("ALTER TABLE peers ADD COLUMN about TEXT DEFAULT ''")
             if (oldVersion < 4) db.execSQL("ALTER TABLE msgs ADD COLUMN del INTEGER DEFAULT 0")
@@ -86,6 +97,10 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 7) {
                 db.execSQL("ALTER TABLE msgs ADD COLUMN qmine INTEGER DEFAULT 0")
             }
             if (oldVersion < 7) createStatus(db)
+            if (oldVersion < 8) {
+                db.execSQL("ALTER TABLE peers ADD COLUMN pub TEXT DEFAULT ''")
+                createRelay(db)
+            }
             if (oldVersion < 6) {
                 db.execSQL("ALTER TABLE msgs ADD COLUMN kind TEXT DEFAULT 't'")
                 db.execSQL("ALTER TABLE msgs ADD COLUMN path TEXT DEFAULT ''")
@@ -99,6 +114,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 7) {
         // messages deleted earlier (after the UNDO time) are removed for good
         db.execSQL("DELETE FROM msgs WHERE del=1")
         db.execSQL("DELETE FROM statuses WHERE ts < " + (System.currentTimeMillis() - 86400000L))
+        db.execSQL("DELETE FROM relay WHERE exp < " + System.currentTimeMillis())
     }
 
     private fun readMsg(c: Cursor): Msg =
@@ -321,6 +337,103 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 7) {
         if (c.moveToFirst()) a = c.getString(0) ?: ""
         c.close()
         return a
+    }
+
+    // ---------- public keys and relay (store-and-forward) ----------
+
+    fun setPub(hash: String, pub: String) {
+        writableDatabase.execSQL("UPDATE peers SET pub=? WHERE hash=?", arrayOf<Any?>(pub, hash))
+    }
+
+    fun pub(hash: String): String {
+        val c = readableDatabase.rawQuery("SELECT pub FROM peers WHERE hash=?", arrayOf(hash))
+        var p = ""
+        if (c.moveToFirst()) p = c.getString(0) ?: ""
+        c.close()
+        return p
+    }
+
+    fun hasRelay(uid: String): Boolean {
+        val c = readableDatabase.rawQuery("SELECT 1 FROM relay WHERE uid=? LIMIT 1", arrayOf(uid))
+        val r = c.moveToFirst()
+        c.close()
+        return r
+    }
+
+    fun relayCount(): Int {
+        val c = readableDatabase.rawQuery("SELECT COUNT(*) FROM relay WHERE done=0", null)
+        var n = 0
+        if (c.moveToFirst()) n = c.getInt(0)
+        c.close()
+        return n
+    }
+
+    fun putRelay(uid: String, dst: String, ts: Long, hops: Int, blob: String) {
+        val cv = ContentValues()
+        cv.put("uid", uid)
+        cv.put("dst", dst)
+        cv.put("ts", ts)
+        cv.put("exp", ts + Relay.TTL_MS)
+        cv.put("hops", hops)
+        cv.put("blob", blob)
+        cv.put("done", 0)
+        writableDatabase.insertWithOnConflict("relay", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
+        // keep at most MAX_CARRY envelopes: drop the oldest first
+        writableDatabase.execSQL(
+            "DELETE FROM relay WHERE done=0 AND uid NOT IN (SELECT uid FROM relay WHERE done=0 ORDER BY ts DESC LIMIT " +
+                Relay.MAX_CARRY + ")"
+        )
+    }
+
+    // everything I carry, so a phone I meet can say which ones it is missing
+    fun relayIds(): List<String> {
+        val out = ArrayList<String>()
+        val c = readableDatabase.rawQuery(
+            "SELECT uid FROM relay WHERE done=0 AND exp>? ORDER BY ts DESC LIMIT " + Relay.MAX_HELLO,
+            arrayOf(System.currentTimeMillis().toString())
+        )
+        while (c.moveToNext()) out.add(c.getString(0) ?: "")
+        c.close()
+        return out
+    }
+
+    fun relayDoneIds(): List<String> {
+        val out = ArrayList<String>()
+        val c = readableDatabase.rawQuery(
+            "SELECT uid FROM relay WHERE done=1 AND exp>? ORDER BY ts DESC LIMIT " + Relay.MAX_HELLO,
+            arrayOf(System.currentTimeMillis().toString())
+        )
+        while (c.moveToNext()) out.add(c.getString(0) ?: "")
+        c.close()
+        return out
+    }
+
+    // an envelope I should hand to a phone that does not have it: (uid, dst, ts, hops, blob)
+    class Env(val uid: String, val dst: String, val ts: Long, val hops: Int, val blob: String)
+
+    fun relayGet(uid: String): Env? {
+        val c = readableDatabase.rawQuery(
+            "SELECT uid, dst, ts, hops, blob FROM relay WHERE uid=? AND done=0", arrayOf(uid)
+        )
+        var e: Env? = null
+        if (c.moveToFirst()) e = Env(c.getString(0) ?: "", c.getString(1) ?: "", c.getLong(2), c.getInt(3), c.getString(4) ?: "")
+        c.close()
+        return e
+    }
+
+    // it reached its owner: forget the content, remember the id (so others forget it too)
+    fun relayDone(uid: String, ts: Long) {
+        writableDatabase.execSQL(
+            "UPDATE relay SET dst='', blob='', done=1 WHERE uid=?", arrayOf<Any?>(uid)
+        )
+        val cv = ContentValues()
+        cv.put("uid", uid)
+        cv.put("dst", "")
+        cv.put("ts", ts)
+        cv.put("exp", ts + Relay.TTL_MS)
+        cv.put("blob", "")
+        cv.put("done", 1)
+        writableDatabase.insertWithOnConflict("relay", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
     }
 
     // ---------- statuses ----------
