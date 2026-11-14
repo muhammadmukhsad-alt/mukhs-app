@@ -13,14 +13,15 @@ Phones talk to each other with Google Nearby Connections (Bluetooth + Wi-Fi Dire
 - [x] Carry up to 300 envelopes, 7-day expiry, 8 hops; swap on every connection
 - [x] Delivery tombstones so carriers drop delivered messages; sender gets the double tick
 - [x] Text via relay (needs the receiver's public key, learned at the first direct meeting)
-- [ ] Voice notes via relay (chunked envelopes)
+- [x] Voice notes, photos and small files via relay (chunked envelopes, up to 700 KB)
 - [ ] Connect to non-contacts as carriers (today only phone contacts are discovered)
 - [ ] Username addressing (directory gossiped with public keys)
 - [ ] "last seen" shown from relay activity; badges already exist
 
 ## Phase 2 - Reference-video UI gaps
 Done already (v0.17): splash, light/dark doodle, filter chips, bottom tabs, FAB, call cards "Tap to call back", call screens, status.
-To do: Calls tab quick actions (Call / Schedule / Keypad / Favourites), real groups and broadcast lists (data model + create flow), group info (Media / Links / Docs, chat lock, disappearing), media editor polish.
+Done in v0.19: Calls tab (Call / Schedule / Keypad / Favourites + scheduled list), real groups and broadcast lists (create flow, fan-out direct or through the relay, sender names in group bubbles, group info).
+To do: group info screen (Media / Links / Docs, chat lock, disappearing), add/remove members, group read receipts, group icon picker, scheduled-call alarm, media editor polish.
 
 ## Phase 3 - Feed and Reels mode
 Posts/short videos stored locally, synced when phones meet (same relay with public envelopes), chat/feed toggle.

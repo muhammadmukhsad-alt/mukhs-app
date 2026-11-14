@@ -584,25 +584,102 @@ class MainActivity : Activity(), NetListener {
         handler.post(callTick)
     }
 
-    // the list of calls (the Calls tab)
+    // the Calls tab: Call / Schedule / Keypad / Favourites, scheduled calls, then recent calls
     private fun callsView(): View {
         val sv = ScrollView(this)
         sv.setBackgroundColor(C.BG)
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, dp(90))
+        }
         sv.addView(box, FrameLayout.LayoutParams(MATCH, WRAP))
+
+        val quick = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(8), dp(12), dp(8), dp(8))
+        }
+        fun qa(ic: Int, label: String, go: () -> Unit) {
+            val c = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setOnClickListener { go() }
+            }
+            val iv = ImageView(this)
+            iv.setImageResource(ic)
+            iv.setColorFilter(C.TEXT)
+            iv.setPadding(dp(16), dp(16), dp(16), dp(16))
+            iv.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(C.CARD)
+            }
+            c.addView(iv, LinearLayout.LayoutParams(dp(58), dp(58)))
+            c.addView(txt(label, 12f, C.SUB).apply { gravity = Gravity.CENTER }, lp(6))
+            quick.addView(c, LinearLayout.LayoutParams(0, WRAP, 1f))
+        }
+        qa(R.drawable.ic_call, L.s("Kira", "Call")) { pickContactToCall() }
+        qa(R.drawable.ic_schedule, L.s("Tsara lokaci", "Schedule")) { scheduleCall() }
+        qa(R.drawable.ic_keypad, "Keypad") { showKeypad() }
+        qa(R.drawable.ic_heart, L.s("Abokan so", "Favourites")) { showFavouriteCalls() }
+        box.addView(quick, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val fmt = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault())
+
+        // scheduled calls
+        val sched = ArrayList<Pair<String, Long>>()
+        for (e in getSet("sched")) {
+            val p = e.split("|")
+            val t = if (p.size == 2) p[1].toLongOrNull() else null
+            if (t != null) sched.add(Pair(p[0], t))
+        }
+        sched.sortBy { it.second }
+        if (sched.isNotEmpty()) {
+            box.addView(txt(L.s("An tsara", "Scheduled"), 20f, C.TEXT, true).apply { setPadding(dp(16), dp(10), dp(16), dp(4)) })
+            for (sc in sched) {
+                val due = sc.second <= System.currentTimeMillis()
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(16), dp(10), dp(16), dp(10))
+                    setOnLongClickListener {
+                        val set = getSet("sched")
+                        set.remove(sc.first + "|" + sc.second)
+                        putSet("sched", set)
+                        toast(L.s("An cire.", "Removed."))
+                        renderTab()
+                        true
+                    }
+                }
+                row.addView(avatar(net.nameOf(sc.first), 46, false, sc.first))
+                val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                mid.addView(txt(net.nameOf(sc.first), 17f, C.TEXT))
+                mid.addView(
+                    txt(
+                        (if (due) L.s("⏰ Lokaci ya yi · ", "⏰ Due now · ") else "🗓 ") + fmt.format(Date(sc.second)),
+                        13f, if (due) Color.parseColor("#E53935") else C.SUB
+                    )
+                )
+                row.addView(mid, LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dp(12) })
+                row.addView(icon(R.drawable.ic_call, 24, C.ACCENT) { startCall(sc.first, false) })
+                box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+            }
+        }
+
+        box.addView(txt(L.s("Na kwanan nan", "Recent"), 20f, C.TEXT, true).apply { setPadding(dp(16), dp(10), dp(16), dp(4)) })
         val log = Calls.history(this)
         if (log.isEmpty()) {
             box.addView(
                 txt(L.s("Babu kira tukuna. Ka buɗe chat ka danna alamar waya.", "No calls yet. Open a chat and tap the phone icon."), 15f, C.SUB).apply {
                     gravity = Gravity.CENTER
-                    setPadding(dp(32), dp(60), dp(32), 0)
+                    setPadding(dp(32), dp(30), dp(32), 0)
                 },
                 LinearLayout.LayoutParams(MATCH, WRAP)
             )
             return sv
         }
-        val fmt = java.text.SimpleDateFormat("d MMM, h:mm a", java.util.Locale.getDefault())
+        val green = Color.parseColor("#25A55F")
+        val red = Color.parseColor("#E53935")
         for (e in log) {
+            val missed = e.result == "missed"
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -610,16 +687,115 @@ class MainActivity : Activity(), NetListener {
             }
             row.addView(avatar(net.nameOf(e.h), 46, false, e.h))
             val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            mid.addView(txt(net.nameOf(e.h), 17f, if (e.result == "missed") Color.parseColor("#E53935") else C.TEXT, true))
-            val arrow = if (e.incoming) "↙ " else "↗ "
-            val how = if (e.result == "missed") L.s("Ba a ɗauka ba", "Missed") else if (e.dur > 0) String.format("%d:%02d", e.dur / 60, e.dur % 60) else
+            mid.addView(txt(net.nameOf(e.h), 17f, if (missed) red else C.TEXT))
+            val how = if (missed) L.s("Ba a ɗauka ba", "Missed") else if (e.dur > 0) String.format("%d:%02d", e.dur / 60, e.dur % 60) else
                 if (e.incoming) L.s("An ƙi", "Declined") else L.s("Ba a amsa ba", "No answer")
-            mid.addView(txt(arrow + fmt.format(java.util.Date(e.ts)) + "  ·  " + how, 13f, C.SUB))
+            val sub = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            sub.addView(txt(if (e.incoming) "↙ " else "↗ ", 14f, if (missed) red else green, true))
+            sub.addView(txt(fmt.format(Date(e.ts)) + "  ·  " + how, 13f, C.SUB))
+            mid.addView(sub)
             row.addView(mid, LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dp(12) })
-            row.addView(icon(if (e.video) R.drawable.ic_videocam else R.drawable.ic_call, 24, C.ACCENT) { startCall(e.h, e.video) })
+            row.addView(icon(if (e.video) R.drawable.ic_videocam else R.drawable.ic_call, 24, C.TEXT) { startCall(e.h, e.video) })
             box.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
         }
         return sv
+    }
+
+    // contacts as (hash, name), sorted by name
+    private fun contactChoices(): List<Pair<String, String>> =
+        net.contacts.entries
+            .filter { it.key != net.myHash }
+            .map { Pair(it.key, it.value.first) }
+            .sortedBy { it.second.lowercase() }
+
+    private fun pickContact(title: String, then: (String) -> Unit) {
+        val list = contactChoices()
+        if (list.isEmpty()) {
+            toast(L.s("Babu contact da aka samu.", "No contacts found."))
+            return
+        }
+        dlg()
+            .setTitle(title)
+            .setItems(list.map { it.second }.toTypedArray()) { _, i -> then(list[i].first) }
+            .show()
+    }
+
+    private fun pickContactToCall() {
+        pickContact(L.s("Kira...", "Call...")) { h -> startCall(h, false) }
+    }
+
+    private fun scheduleCall() {
+        pickContact(L.s("Tsara kira da...", "Schedule a call with...")) { h ->
+            val now = Calendar.getInstance()
+            android.app.DatePickerDialog(this, { _, y, mo, d ->
+                android.app.TimePickerDialog(this, { _, hh, mm ->
+                    val at = Calendar.getInstance()
+                    at.set(y, mo, d, hh, mm, 0)
+                    val set = getSet("sched")
+                    set.add(h + "|" + at.timeInMillis)
+                    putSet("sched", set)
+                    toast(L.s("An tsara kira.", "Call scheduled."))
+                    if (screen == 1 && tab == 4) renderTab()
+                }, now.get(Calendar.HOUR_OF_DAY), now.get(Calendar.MINUTE), false).show()
+            }, now.get(Calendar.YEAR), now.get(Calendar.MONTH), now.get(Calendar.DAY_OF_MONTH)).show()
+        }
+    }
+
+    private fun showFavouriteCalls() {
+        val favs = getSet("favs").filter { !Groups.isId(it) }
+        if (favs.isEmpty()) {
+            toast(L.s("Babu abokan so tukuna. Dogon latsa chat ka ƙara.", "No favourites yet. Long-press a chat and choose Add to favourites."))
+            return
+        }
+        dlg()
+            .setTitle(L.s("Abokan so", "Favourites"))
+            .setItems(favs.map { net.nameOf(it) }.toTypedArray()) { _, i -> startCall(favs[i], false) }
+            .show()
+    }
+
+    // dial a number: it must be a MukhsApp person that is connected
+    private fun showKeypad() {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(C.BG)
+            setPadding(dp(20), dp(12), dp(20), dp(8))
+        }
+        val num = txt("", 28f, C.TEXT, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, dp(12))
+        }
+        col.addView(num, LinearLayout.LayoutParams(MATCH, WRAP))
+        val keys = arrayOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "+", "0", "⌫")
+        for (r in 0 until 4) {
+            val rowL = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (c in 0 until 3) {
+                val k = keys[r * 3 + c]
+                val b = txt(k, 24f, C.TEXT, true)
+                b.gravity = Gravity.CENTER
+                b.background = round(C.CARD, 30)
+                b.setOnClickListener {
+                    val cur = num.text.toString()
+                    if (k == "⌫") num.text = cur.dropLast(1)
+                    else if (cur.length < 16) num.text = cur + k
+                }
+                rowL.addView(b, LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(6), dp(6), dp(6), dp(6)) })
+            }
+            col.addView(rowL, LinearLayout.LayoutParams(MATCH, WRAP))
+        }
+        val d = dlg().setView(col).create()
+        col.addView(pill(L.s("Kira", "Call"), C.BTN, C.ON_BTN) {
+            val n = Num.normalize(num.text.toString())
+            if (n == null) {
+                toast(L.s("Lamba ba daidai ba.", "Enter a valid number."))
+            } else {
+                d.dismiss()
+                startCall(Num.hashOf(n), false)
+            }
+        }, lp(8))
+        d.show()
     }
 
     private fun soon() = toast(L.s("Zai zo nan ba da daɗewa ba.", "Coming soon."))
@@ -1234,7 +1410,7 @@ class MainActivity : Activity(), NetListener {
             showMenu(
                 v,
                 listOf<Pair<String, () -> Unit>>(
-                    Pair(L.s("Sabon group", "New group")) { soon() },
+                    Pair(L.s("Sabon group", "New group")) { showNewGroup("g") },
                     Pair(L.s("Saituna", "Settings")) {
                         tmpName = ""
                         tmpAbout = ""
@@ -1564,7 +1740,7 @@ class MainActivity : Activity(), NetListener {
         val favs = getSet("favs")
         if (chatFilter == 1) list = list.filter { it.unread > 0 }
         else if (chatFilter == 2) list = list.filter { favs.contains(it.peer) }
-        else if (chatFilter == 3) list = emptyList()
+        else if (chatFilter == 3) list = list.filter { Groups.isId(it.peer) }
         list = list.sortedByDescending { pins.contains(it.peer) }
         if (list.isEmpty()) {
             box.addView(
@@ -1631,7 +1807,7 @@ class MainActivity : Activity(), NetListener {
             sub.addView(tk)
         }
         sub.addView(
-            txt(previewOf(cv.last), 14f, C.SUB).apply {
+            txt(senderPrefix(cv) + previewOf(cv.last), 14f, C.SUB).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
@@ -2867,7 +3043,8 @@ class MainActivity : Activity(), NetListener {
         box.removeAllViews()
         val q = contactQuery.trim().lowercase()
         if (q.isEmpty()) {
-            box.addView(actionRow(R.drawable.ic_people, L.s("Sabon group", "New group")) { soon() })
+            box.addView(actionRow(R.drawable.ic_people, L.s("Sabon group", "New group")) { showNewGroup("g") })
+            box.addView(actionRow(R.drawable.ic_nearby, L.s("Sabon broadcast", "New broadcast list")) { showNewGroup("b") })
             box.addView(actionRow(R.drawable.ic_person, L.s("Sabon contact", "New contact")) {
                 try {
                     startActivity(Intent(Intent.ACTION_INSERT, ContactsContract.Contacts.CONTENT_URI))
@@ -2935,6 +3112,153 @@ class MainActivity : Activity(), NetListener {
             row.addView(mid, LinearLayout.LayoutParams(0, WRAP, 1f))
             box.addView(row)
         }
+    }
+
+    // ---------- groups and broadcast lists ----------
+
+    private fun senderPrefix(cv: Convo): String =
+        if (Groups.isGroupId(cv.peer) && !cv.last.mine && cv.last.sender.isNotEmpty()) net.nameOf(cv.last.sender) + ": " else ""
+
+    private fun senderColor(name: String): Int {
+        val p = intArrayOf(
+            Color.parseColor("#E57373"), Color.parseColor("#64B5F6"), Color.parseColor("#FFB74D"),
+            Color.parseColor("#BA68C8"), Color.parseColor("#4DB6AC"), Color.parseColor("#AED581")
+        )
+        return p[(name.hashCode() and 0x7fffffff) % p.size]
+    }
+
+    private fun groupSubtitle(h: String): String {
+        val g = store.group(h) ?: return ""
+        if (g.kind == "b") return L.s("Masu karɓa: ", "Recipients: ") + g.members.size
+        return g.members.joinToString(", ") { if (it == net.myHash) L.s("Kai", "You") else net.nameOf(it) }
+    }
+
+    private fun showGroupInfo(h: String) {
+        val g = store.group(h) ?: return
+        val sb = StringBuilder()
+        if (g.kind == "g") {
+            sb.append(L.s("Mai gudanarwa: ", "Admin: "))
+                .append(if (g.admin == net.myHash) L.s("Kai", "You") else net.nameOf(g.admin)).append("\n\n")
+        }
+        sb.append(g.members.size).append(if (g.kind == "g") L.s(" membobi:\n", " members:\n") else L.s(" masu karɓa:\n", " recipients:\n"))
+        for (m in g.members) sb.append("• ").append(if (m == net.myHash) L.s("Kai", "You") else net.nameOf(m)).append("\n")
+        dlg()
+            .setTitle(g.name)
+            .setMessage(sb.toString())
+            .setPositiveButton("OK", null)
+            .setNegativeButton(if (g.kind == "g") L.s("Fita daga group", "Exit group") else L.s("Share list", "Delete list")) { _, _ ->
+                store.deleteGroup(h)
+                showHome()
+            }
+            .show()
+    }
+
+    // pick people, give a name, create. kind "g" = group, "b" = broadcast list
+    private fun showNewGroup(kind: String) {
+        screen = 4
+        currentChat = null
+        window.statusBarColor = C.BAR
+        window.navigationBarColor = C.BG
+        val picked = LinkedHashSet<String>()
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(C.BG)
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(C.BAR)
+            setPadding(dp(4), dp(8), dp(4), dp(8))
+        }
+        header.addView(icon(R.drawable.ic_arrow_back, 24, C.BAR_ICON) { showContacts() })
+        val tb = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), 0, dp(4), 0)
+        }
+        tb.addView(txt(if (kind == "g") L.s("Sabon group", "New group") else L.s("Sabon broadcast", "New broadcast list"), 18f, C.BAR_TEXT, true))
+        val countView = txt(L.s("Zaɓi mutane", "Select people"), 12f, C.BAR_SUB)
+        tb.addView(countView)
+        header.addView(tb, LinearLayout.LayoutParams(0, WRAP, 1f))
+        root.addView(header, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val name = styledInput(
+            if (kind == "g") L.s("Sunan group", "Group name") else L.s("Sunan list (ba dole ba)", "List name (optional)"),
+            InputType.TYPE_CLASS_TEXT
+        )
+        root.addView(name, LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(dp(12), dp(10), dp(12), dp(6)) })
+
+        val sv = ScrollView(this)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(6), dp(12), dp(20))
+        }
+        sv.addView(box)
+        root.addView(sv, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        fun paintMark(tv: TextView, on: Boolean) {
+            tv.text = if (on) "✓" else ""
+            tv.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(if (on) C.BTN else C.INPUT)
+            }
+        }
+        for (c in contactChoices()) {
+            val h = c.first
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+            }
+            row.addView(avatar(c.second, 44, net.isNearby(h), h))
+            row.addView(
+                txt(c.second, 16f, C.TEXT, true).apply {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                },
+                LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dp(14) }
+            )
+            val mark = txt("", 16f, C.ON_BTN, true)
+            mark.gravity = Gravity.CENTER
+            paintMark(mark, false)
+            row.addView(mark, LinearLayout.LayoutParams(dp(28), dp(28)))
+            row.setOnClickListener {
+                if (picked.contains(h)) picked.remove(h) else picked.add(h)
+                paintMark(mark, picked.contains(h))
+                countView.text = if (picked.isEmpty()) L.s("Zaɓi mutane", "Select people") else picked.size.toString() + L.s(" an zaɓa", " selected")
+            }
+            box.addView(row)
+        }
+
+        fun create() {
+            if (picked.isEmpty()) {
+                toast(L.s("Zaɓi akalla mutum ɗaya.", "Select at least one person."))
+                return
+            }
+            val nm = name.text.toString().trim()
+            if (kind == "g" && nm.isEmpty()) {
+                toast(L.s("Rubuta sunan group.", "Enter a group name."))
+                return
+            }
+            val gid = Groups.newId(kind)
+            val members = ArrayList<String>()
+            if (kind == "g") members.add(net.myHash)
+            members.addAll(picked)
+            store.putGroup(gid, if (nm.isEmpty()) "Broadcast list" else nm.take(40), members, net.myHash, kind)
+            if (kind == "g") {
+                net.sendText(gid, L.s("👥 An ƙirƙiri group", "👥 Group created"))
+            } else {
+                store.insertOut(
+                    gid, java.util.UUID.randomUUID().toString(),
+                    "📢 " + L.s("Masu karɓa: ", "Recipients: ") + picked.size, System.currentTimeMillis(), 1
+                )
+            }
+            showChat(gid)
+        }
+        root.addView(
+            pill(L.s("Ƙirƙiri", "Create"), C.BTN, C.ON_BTN) { create() },
+            LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(dp(16), dp(8), dp(16), dp(16)) }
+        )
+        setContentView(root)
     }
 
     // ---------- permissions ----------
@@ -3090,6 +3414,7 @@ class MainActivity : Activity(), NetListener {
     }
 
     private fun chatStatusText(h: String): String {
+        if (Groups.isId(h)) return groupSubtitle(h)
         if (net.isConnected(h)) return "online"
         if (net.isNearby(h)) return L.s("kusa (ba a haɗa ba)", "nearby (not connected)")
         val ls = store.lastSeen(h)
@@ -3124,6 +3449,10 @@ class MainActivity : Activity(), NetListener {
     }
 
     private fun viewContact(h: String) {
+        if (Groups.isId(h)) {
+            showGroupInfo(h)
+            return
+        }
         val msg = StringBuilder()
         val num = net.contacts[h]?.second
         if (num != null) msg.append("+").append(num).append("\n\n")
@@ -3159,7 +3488,7 @@ class MainActivity : Activity(), NetListener {
         showMenu(
             anchor,
             listOf<Pair<String, () -> Unit>>(
-                Pair(L.s("Sabon group", "New group")) { soon() },
+                Pair(L.s("Sabon group", "New group")) { showNewGroup("g") },
                 Pair(L.s("Duba contact", "View contact")) { viewContact(h) },
                 Pair(L.s("Bincika", "Search")) { soon() },
                 Pair(L.s("Hotuna, links da docs", "Media, links, and docs")) { soon() },
@@ -3389,8 +3718,10 @@ class MainActivity : Activity(), NetListener {
         chatStatusView = st
         titleBox.addView(st)
         header.addView(titleBox, LinearLayout.LayoutParams(0, WRAP, 1f))
-        header.addView(icon(R.drawable.ic_videocam, 24, C.BAR_ICON) { startCall(h, true) })
-        header.addView(icon(R.drawable.ic_call, 24, C.BAR_ICON) { startCall(h, false) })
+        if (!Groups.isId(h)) {
+            header.addView(icon(R.drawable.ic_videocam, 24, C.BAR_ICON) { startCall(h, true) })
+            header.addView(icon(R.drawable.ic_call, 24, C.BAR_ICON) { startCall(h, false) })
+        }
         header.addView(icon(R.drawable.ic_more_vert, 24, C.BAR_ICON) { v -> chatMenu(v, h) })
         root.addView(header, LinearLayout.LayoutParams(MATCH, WRAP))
 
@@ -4602,6 +4933,10 @@ class MainActivity : Activity(), NetListener {
             setPadding(dp(12), dp(8), dp(10), dp(6))
         }
         val textColor = if (m.mine) C.FOREST else C.TEXT
+        if (!m.mine && m.sender.isNotEmpty()) {
+            val sn = net.nameOf(m.sender)
+            bubble.addView(txt(sn, 12f, senderColor(sn), true))
+        }
         if (m.quote.isNotEmpty()) {
             val qb = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL

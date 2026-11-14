@@ -34,7 +34,10 @@ object Relay {
     const val TTL_MS = 7L * 24 * 3600 * 1000     // an envelope is dropped after 7 days
     const val MAX_CARRY = 300                     // how many envelopes one phone carries at most
     const val MAX_HELLO = 300                     // how many ids we list when two phones meet
-    const val MAX_BLOB = 22000                    // one envelope must fit in one 32 KB payload
+    const val MAX_BLOB = 1500000                  // biggest sealed envelope (a voice note or a photo)
+    const val MAX_FILE = 700000                   // biggest file (bytes) that is sent through the relay
+    const val MAX_BYTES = 40L * 1000 * 1000       // all envelopes one phone carries, in characters
+    const val PIECE = 20000                       // one piece of a big envelope (a payload is limited to 32 KB)
 
     private const val PREF = "mukhs_keys"
     private val rnd = SecureRandom()
@@ -150,4 +153,12 @@ object Relay {
             return null
         }
     }
+}
+
+// ids of groups ("g_...") and broadcast lists ("b_..."); a person is a 12 letter code, so they never clash
+object Groups {
+    fun isId(h: String): Boolean = h.startsWith("g_") || h.startsWith("b_")
+    fun isGroupId(h: String): Boolean = h.startsWith("g_")
+    fun isBroadcastId(h: String): Boolean = h.startsWith("b_")
+    fun newId(kind: String): String = kind + "_" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12)
 }

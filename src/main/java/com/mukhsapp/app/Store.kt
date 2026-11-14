@@ -21,7 +21,8 @@ data class Msg(
     val qmine: Boolean = false,
     val kind: String = "t",
     val path: String = "",
-    val dur: Int = 0
+    val dur: Int = 0,
+    val sender: String = ""
 )
 
 // a status (24 hours). owner = "" means it is mine.
@@ -42,9 +43,12 @@ data class StatusOwner(val owner: String, val total: Int, val unviewed: Int, val
 
 data class Convo(val peer: String, val last: Msg, val unread: Int)
 
-private const val COLS = "id, uid, mine, body, ts, state, react, star, quote, qmine, kind, path, dur"
+// a group (kind "g": everyone sees everyone) or a broadcast list (kind "b": only I see the list)
+class Grp(val gid: String, val name: String, val members: List<String>, val admin: String, val kind: String)
 
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 8) {
+private const val COLS = "id, uid, mine, body, ts, state, react, star, quote, qmine, kind, path, dur, sender"
+
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 9) {
 
     private fun create(db: SQLiteDatabase) {
         db.execSQL(
@@ -52,7 +56,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 8) {
                 "mine INTEGER, body TEXT, ts INTEGER, sent INTEGER, uid TEXT, " +
                 "state INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, racked INTEGER DEFAULT 1, del INTEGER DEFAULT 0, " +
                 "react TEXT DEFAULT '', star INTEGER DEFAULT 0, quote TEXT DEFAULT '', qmine INTEGER DEFAULT 0, " +
-                "kind TEXT DEFAULT 't', path TEXT DEFAULT '', dur INTEGER DEFAULT 0)"
+                "kind TEXT DEFAULT 't', path TEXT DEFAULT '', dur INTEGER DEFAULT 0, sender TEXT DEFAULT '')"
         )
         db.execSQL("CREATE TABLE peers(hash TEXT PRIMARY KEY, name TEXT, last_seen INTEGER DEFAULT 0, about TEXT DEFAULT '', pub TEXT DEFAULT '')")
     }
@@ -74,10 +78,19 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 8) {
         db.execSQL("CREATE TABLE IF NOT EXISTS status_views(uid TEXT, viewer TEXT, ts INTEGER, PRIMARY KEY(uid, viewer))")
     }
 
+    // groups, broadcast lists, and group messages still waiting for one member
+    private fun createGroups(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS grp(gid TEXT PRIMARY KEY, name TEXT, members TEXT, admin TEXT, kind TEXT, ts INTEGER)"
+        )
+        db.execSQL("CREATE TABLE IF NOT EXISTS gq(uid TEXT, member TEXT, PRIMARY KEY(uid, member))")
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         create(db)
         createStatus(db)
         createRelay(db)
+        createGroups(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -87,6 +100,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 8) {
             create(db)
             createStatus(db)
             createRelay(db)
+            createGroups(db)
         } else {
             if (oldVersion < 3) db.execSQL("ALTER TABLE peers ADD COLUMN about TEXT DEFAULT ''")
             if (oldVersion < 4) db.execSQL("ALTER TABLE msgs ADD COLUMN del INTEGER DEFAULT 0")
@@ -100,6 +114,10 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 8) {
             if (oldVersion < 8) {
                 db.execSQL("ALTER TABLE peers ADD COLUMN pub TEXT DEFAULT ''")
                 createRelay(db)
+            }
+            if (oldVersion < 9) {
+                db.execSQL("ALTER TABLE msgs ADD COLUMN sender TEXT DEFAULT ''")
+                createGroups(db)
             }
             if (oldVersion < 6) {
                 db.execSQL("ALTER TABLE msgs ADD COLUMN kind TEXT DEFAULT 't'")
@@ -131,7 +149,8 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 8) {
             c.getInt(9) == 1,
             c.getString(10) ?: "t",
             c.getString(11) ?: "",
-            c.getInt(12)
+            c.getInt(12),
+            c.getString(13) ?: ""
         )
 
     // ---------- messages ----------
@@ -339,6 +358,71 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 8) {
         return a
     }
 
+    // ---------- groups and broadcast lists ----------
+
+    fun putGroup(gid: String, name: String, members: List<String>, admin: String, kind: String) {
+        val cv = ContentValues()
+        cv.put("gid", gid)
+        cv.put("name", name)
+        cv.put("members", members.joinToString(","))
+        cv.put("admin", admin)
+        cv.put("kind", kind)
+        cv.put("ts", System.currentTimeMillis())
+        writableDatabase.insertWithOnConflict("grp", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun group(gid: String): Grp? {
+        val c = readableDatabase.rawQuery("SELECT gid, name, members, admin, kind FROM grp WHERE gid=?", arrayOf(gid))
+        var g: Grp? = null
+        if (c.moveToFirst()) {
+            g = Grp(
+                c.getString(0) ?: "", c.getString(1) ?: "",
+                (c.getString(2) ?: "").split(",").filter { it.isNotEmpty() },
+                c.getString(3) ?: "", c.getString(4) ?: "g"
+            )
+        }
+        c.close()
+        return g
+    }
+
+    fun groupName(gid: String): String = group(gid)?.name ?: "Group"
+
+    fun deleteGroup(gid: String) {
+        writableDatabase.execSQL("DELETE FROM grp WHERE gid=?", arrayOf<Any?>(gid))
+        writableDatabase.execSQL("DELETE FROM msgs WHERE peer=?", arrayOf<Any?>(gid))
+    }
+
+    fun setSender(uid: String, sender: String) {
+        writableDatabase.execSQL("UPDATE msgs SET sender=? WHERE uid=?", arrayOf<Any?>(sender, uid))
+    }
+
+    fun msgByUid(uid: String): Msg? {
+        val c = readableDatabase.rawQuery("SELECT $COLS FROM msgs WHERE uid=? LIMIT 1", arrayOf(uid))
+        var m: Msg? = null
+        if (c.moveToFirst()) m = readMsg(c)
+        c.close()
+        return m
+    }
+
+    // group messages that could not be sent to this member yet: (uid, group id)
+    fun gqAdd(uid: String, member: String) {
+        writableDatabase.execSQL("INSERT OR IGNORE INTO gq(uid, member) VALUES(?, ?)", arrayOf<Any?>(uid, member))
+    }
+
+    fun gqFor(member: String): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        val c = readableDatabase.rawQuery(
+            "SELECT g.uid, m.peer FROM gq g JOIN msgs m ON m.uid = g.uid WHERE g.member=?", arrayOf(member)
+        )
+        while (c.moveToNext()) out.add(Pair(c.getString(0) ?: "", c.getString(1) ?: ""))
+        c.close()
+        return out
+    }
+
+    fun gqDone(uid: String, member: String) {
+        writableDatabase.execSQL("DELETE FROM gq WHERE uid=? AND member=?", arrayOf<Any?>(uid, member))
+    }
+
     // ---------- public keys and relay (store-and-forward) ----------
 
     fun setPub(hash: String, pub: String) {
@@ -383,6 +467,17 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 8) {
             "DELETE FROM relay WHERE done=0 AND uid NOT IN (SELECT uid FROM relay WHERE done=0 ORDER BY ts DESC LIMIT " +
                 Relay.MAX_CARRY + ")"
         )
+        // and at most MAX_BYTES of content in total
+        while (true) {
+            val c = readableDatabase.rawQuery("SELECT COALESCE(SUM(LENGTH(blob)), 0) FROM relay WHERE done=0", null)
+            var total = 0L
+            if (c.moveToFirst()) total = c.getLong(0)
+            c.close()
+            if (total <= Relay.MAX_BYTES) break
+            writableDatabase.execSQL(
+                "DELETE FROM relay WHERE uid = (SELECT uid FROM relay WHERE done=0 ORDER BY ts ASC LIMIT 1)"
+            )
+        }
     }
 
     // everything I carry, so a phone I meet can say which ones it is missing

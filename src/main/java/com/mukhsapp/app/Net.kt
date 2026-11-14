@@ -84,6 +84,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
     // ---------- people ----------
 
     fun nameOf(h: String): String {
+        if (Groups.isId(h)) return store.groupName(h)
         val c = contacts[h]
         return if (c != null) c.first else store.peerName(h)
     }
@@ -213,7 +214,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
     }
 
     // a photo, voice note or document: a small header, then the file in pieces
-    private fun sendMediaOut(ep: String, uid: String, ts: Long, kind: String, path: String, name: String, dur: Int, quote: String = "", qmine: Boolean = false) {
+    private fun sendMediaOut(ep: String, uid: String, ts: Long, kind: String, path: String, name: String, dur: Int, quote: String = "", qmine: Boolean = false, meta: JSONObject? = null) {
         val f = File(path)
         if (!f.exists()) return
         val b64 = Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)
@@ -222,6 +223,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
         val head = JSONObject().put("t", "f").put("id", uid).put("ts", ts).put("k", kind)
             .put("n", name).put("dur", dur).put("c", total)
         if (quote.isNotEmpty()) head.put("q", quote).put("qw", if (qmine) 1 else 0)
+        mergeInto(head, meta)
         send(ep, head)
         for (i in 0 until total) {
             val part = b64.substring(i * size, minOf(b64.length, (i + 1) * size))
@@ -232,10 +234,13 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
     fun sendMedia(h: String, kind: String, path: String, name: String, dur: Int, quote: String = "", qmine: Boolean = false): Msg {
         val uid = UUID.randomUUID().toString()
         val ts = System.currentTimeMillis()
+        if (Groups.isId(h)) return fanOut(h, uid, ts, kind, name, path, dur, quote, qmine)
         val ep = endpointOfConnected(h)
         var state = 0
         if (ep != null) {
             sendMediaOut(ep, uid, ts, kind, path, name, dur, quote, qmine)
+            state = 1
+        } else if (relayOutMedia(h, uid, ts, kind, path, name, dur, quote, qmine, null) == 2) {
             state = 1
         }
         val id = store.insertOut(h, uid, name, ts, state, quote, qmine, kind, path, dur)
@@ -275,13 +280,15 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
             f.writeBytes(Base64.decode(parts.joinToString(""), Base64.NO_WRAP))
             val ts = meta.optLong("ts", System.currentTimeMillis())
             val dur = meta.optInt("dur")
-            val viewing = foreground && activeChat == h
+            val peer = peerFor(h, meta)
+            val viewing = foreground && activeChat == peer
             val mq = meta.optString("q")
             val mqm = meta.optInt("qw") == 1
-            val rowId = store.insertIn(h, uid, name, ts, !viewing, mq, mqm, kind, f.path, dur)
+            val rowId = store.insertIn(peer, uid, name, ts, !viewing, mq, mqm, kind, f.path, dur)
+            if (peer != h) store.setSender(uid, h)
             store.touchSeen(h)
             if (viewing) sendReadAck(ep, listOf(uid))
-            ui.onIncoming(h, Msg(rowId, uid, false, name, ts, 0, "", false, mq, mqm, kind, f.path, dur))
+            ui.onIncoming(peer, Msg(rowId, uid, false, name, ts, 0, "", false, mq, mqm, kind, f.path, dur, if (peer != h) h else ""))
         } catch (e: Exception) {
             // ignore a broken file
         }
@@ -353,10 +360,20 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
         )
     }
 
-    private fun msgJson(uid: String, ts: Long, body: String, quote: String = "", qmine: Boolean = false): JSONObject {
+    private fun msgJson(uid: String, ts: Long, body: String, quote: String = "", qmine: Boolean = false, meta: JSONObject? = null): JSONObject {
         val j = JSONObject().put("t", "m").put("id", uid).put("ts", ts).put("b", body)
         if (quote.isNotEmpty()) j.put("q", quote).put("qw", if (qmine) 1 else 0)
+        mergeInto(j, meta)
         return j
+    }
+
+    private fun mergeInto(to: JSONObject, from: JSONObject?) {
+        if (from == null) return
+        val names = from.keys()
+        while (names.hasNext()) {
+            val k = names.next()
+            to.put(k, from.get(k))
+        }
     }
 
     private fun sendReadAck(ep: String, uids: List<String>) {
@@ -368,12 +385,13 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
     fun sendText(h: String, text: String, quote: String = "", qmine: Boolean = false): Msg {
         val uid = UUID.randomUUID().toString()
         val ts = System.currentTimeMillis()
+        if (Groups.isId(h)) return fanOut(h, uid, ts, "t", text, "", 0, quote, qmine)
         val ep = endpointOfConnected(h)
         var state = 0
         if (ep != null) {
             send(ep, msgJson(uid, ts, text, quote, qmine))
             state = 1
-        } else if (relayOut(h, uid, ts, text, quote, qmine)) {
+        } else if (relayOut(h, uid, ts, text, quote, qmine, null) == 2) {
             state = 1
         }
         val id = store.insertOut(h, uid, text, ts, state, quote, qmine)
@@ -385,21 +403,56 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
     private fun relayJson(uid: String, dst: String, ts: Long, hops: Int, blob: String): JSONObject =
         JSONObject().put("t", "re").put("id", uid).put("dst", dst).put("ts", ts).put("hp", hops).put("b", blob)
 
-    // The person is not near me. Seal the message for them, keep it, and hand it to everyone
-    // I am connected to now; it also goes to whoever I meet later. Returns true if somebody took it.
-    private fun relayOut(h: String, uid: String, ts: Long, text: String, quote: String, qmine: Boolean): Boolean {
+    // one envelope to one phone: in one piece if it is small, else in pieces ("rc")
+    private fun sendEnvelope(ep: String, uid: String, dst: String, ts: Long, hops: Int, blob: String) {
+        if (blob.length <= 22000) {
+            send(ep, relayJson(uid, dst, ts, hops, blob))
+            return
+        }
+        val total = (blob.length + Relay.PIECE - 1) / Relay.PIECE
+        for (i in 0 until total) {
+            val part = blob.substring(i * Relay.PIECE, minOf(blob.length, (i + 1) * Relay.PIECE))
+            send(
+                ep,
+                JSONObject().put("t", "rc").put("id", uid).put("dst", dst).put("ts", ts).put("hp", hops)
+                    .put("i", i).put("n", total).put("d", part)
+            )
+        }
+    }
+
+    // 0 = could not (no key for that person), 1 = sealed and kept (goes out when I meet anybody),
+    // 2 = sealed, kept and handed to somebody I am connected to right now
+    private fun relayStore(h: String, uid: String, ts: Long, inner: JSONObject, meta: JSONObject?): Int {
         val pub = store.pub(h)
-        if (pub.isEmpty()) return false
-        val inner = JSONObject().put("k", "t").put("b", text)
-        if (quote.isNotEmpty()) inner.put("q", quote).put("qw", if (qmine) 1 else 0)
-        val blob = Relay.seal(ctx, pub, h, myHash, uid, ts, inner) ?: return false
+        if (pub.isEmpty()) return 0
+        mergeInto(inner, meta)
+        val blob = Relay.seal(ctx, pub, h, myHash, uid, ts, inner) ?: return 0
         store.putRelay(uid, h, ts, 0, blob)
         var handed = false
         for (cep in connected.keys) {
-            send(cep, relayJson(uid, h, ts, 1, blob))
+            sendEnvelope(cep, uid, h, ts, 1, blob)
             handed = true
         }
-        return handed
+        return if (handed) 2 else 1
+    }
+
+    // The person is not near me. Seal the message for them, keep it, and hand it to everyone
+    // I am connected to now; it also goes to whoever I meet later.
+    private fun relayOut(h: String, uid: String, ts: Long, text: String, quote: String, qmine: Boolean, meta: JSONObject?): Int {
+        val inner = JSONObject().put("k", "t").put("b", text)
+        if (quote.isNotEmpty()) inner.put("q", quote).put("qw", if (qmine) 1 else 0)
+        return relayStore(h, uid, ts, inner, meta)
+    }
+
+    // voice notes, photos and small documents travel the same way (size limited)
+    private fun relayOutMedia(h: String, uid: String, ts: Long, kind: String, path: String, name: String, dur: Int, quote: String, qmine: Boolean, meta: JSONObject?): Int {
+        if (store.pub(h).isEmpty()) return 0
+        val f = File(path)
+        if (!f.exists() || f.length() > Relay.MAX_FILE) return 0
+        val inner = JSONObject().put("k", kind).put("n", name).put("dur", dur)
+            .put("d", Base64.encodeToString(f.readBytes(), Base64.NO_WRAP))
+        if (quote.isNotEmpty()) inner.put("q", quote).put("qw", if (qmine) 1 else 0)
+        return relayStore(h, uid, ts, inner, meta)
     }
 
     // when two phones meet: say what I carry and what I know is already delivered
@@ -417,6 +470,28 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
         store.setState(uid, 2)
     }
 
+    // pieces of a big envelope that are still arriving: id -> pieces
+    private val relayParts = HashMap<String, Array<String?>>()
+
+    private fun acceptEnvelope(h: String, ep: String, uid: String, dst: String, ts: Long, hops: Int, blob: String) {
+        if (uid.isEmpty() || dst.isEmpty() || blob.isEmpty() || blob.length > Relay.MAX_BLOB) return
+        if (ts + Relay.TTL_MS < System.currentTimeMillis()) return
+        if (store.hasUid(uid)) {
+            if (dst == myHash) send(ep, JSONObject().put("t", "ra").put("id", uid))
+            return
+        }
+        if (store.hasRelay(uid)) return
+        if (dst == myHash) deliverRelayed(ep, uid, blob)
+        else if (hops <= Relay.MAX_HOPS) store.putRelay(uid, dst, ts, hops, blob)
+        ui.onChanged()
+    }
+
+    private fun mediaExt(kind: String, name: String): String {
+        val ext0 = if (kind == "a") "m4a" else if (kind == "i") "jpg" else name.substringAfterLast('.', "bin")
+        val ext = ext0.filter { it.isLetterOrDigit() }.take(8)
+        return if (ext.isEmpty()) "bin" else ext
+    }
+
     // an envelope for me: open it, check who signed it, save it as a normal message
     private fun deliverRelayed(ep: String, uid: String, blob: String) {
         val o = Relay.open(ctx, uid, myHash, blob) ?: return
@@ -425,17 +500,90 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
         val known = store.pub(src)
         if (known.isNotEmpty() && known != o.senderPub) return
         val inner = o.inner
-        if (inner.optString("k", "t") != "t") return
+        val kind = inner.optString("k", "t")
+        if (kind != "t" && kind != "a" && kind != "i" && kind != "d") return
         store.savePeer(src, nameOf(src))
         if (known.isEmpty()) store.setPub(src, o.senderPub)
-        val body = inner.optString("b")
+        val peer = peerFor(src, inner)
         val quote = inner.optString("q")
         val qm = inner.optInt("qw", 0) == 0
-        val viewing = foreground && activeChat == src
-        val rowId = store.insertIn(src, uid, body, o.ts, !viewing, quote, qm)
+        val viewing = foreground && activeChat == peer
+        val rowId: Long
+        val msg: Msg
+        if (kind == "t") {
+            val body = inner.optString("b")
+            rowId = store.insertIn(peer, uid, body, o.ts, !viewing, quote, qm)
+            msg = Msg(rowId, uid, false, body, o.ts, 0, "", false, quote, qm, "t", "", 0, if (peer != src) src else "")
+        } else {
+            val name = inner.optString("n")
+            val dur = inner.optInt("dur")
+            val data = inner.optString("d")
+            if (data.isEmpty()) return
+            val f = File(Media.dir(ctx), "in_" + uid + "." + mediaExt(kind, name))
+            try {
+                f.writeBytes(Base64.decode(data, Base64.NO_WRAP))
+            } catch (e: Exception) {
+                return
+            }
+            rowId = store.insertIn(peer, uid, name, o.ts, !viewing, quote, qm, kind, f.path, dur)
+            msg = Msg(rowId, uid, false, name, o.ts, 0, "", false, quote, qm, kind, f.path, dur, if (peer != src) src else "")
+        }
+        if (peer != src) store.setSender(uid, src)
         store.relayDone(uid, o.ts)
         send(ep, JSONObject().put("t", "ra").put("id", uid))
-        ui.onIncoming(src, Msg(rowId, uid, false, body, o.ts, 0, "", false, quote, qm))
+        ui.onIncoming(peer, msg)
+    }
+
+    // ---------- groups and broadcast lists ----------
+
+    // what every group message carries, so a phone that has never seen the group can build it
+    private fun groupMeta(g: Grp?): JSONObject? {
+        if (g == null || g.kind != "g") return null
+        return JSONObject().put("g", g.gid).put("gn", g.name).put("gm", g.members.joinToString(",")).put("ga", g.admin)
+    }
+
+    // which chat does a message belong to: the group (if it says so and I am in it) or the person
+    private fun peerFor(src: String, j: JSONObject): String {
+        val gid = j.optString("g")
+        if (gid.isEmpty() || !Groups.isGroupId(gid) || gid.length > 30) return src
+        val members = j.optString("gm").split(",").filter { it.length == 12 }.take(100)
+        if (!members.contains(src) || !members.contains(myHash)) return src
+        val old = store.group(gid)
+        if (old == null) {
+            store.putGroup(gid, j.optString("gn").take(40), members, src, "g")
+        } else if (old.admin == src) {
+            store.putGroup(gid, j.optString("gn").take(40), members, old.admin, "g")
+        } else if (!old.members.contains(src)) {
+            return src
+        }
+        return gid
+    }
+
+    // one message to everybody in a group or broadcast list: each person gets it directly if connected,
+    // else sealed through the relay, else it waits until we meet
+    private fun fanOut(gid: String, uid: String, ts: Long, kind: String, body: String, path: String, dur: Int, quote: String, qmine: Boolean): Msg {
+        val g = store.group(gid)
+        val meta = groupMeta(g)
+        var any = false
+        if (g != null) {
+            for (m in g.members) {
+                if (m == myHash) continue
+                val ep = endpointOfConnected(m)
+                if (ep != null) {
+                    if (kind == "t") send(ep, msgJson(uid, ts, body, quote, qmine, meta))
+                    else sendMediaOut(ep, uid, ts, kind, path, body, dur, quote, qmine, meta)
+                    any = true
+                } else {
+                    val r = if (kind == "t") relayOut(m, uid, ts, body, quote, qmine, meta)
+                    else relayOutMedia(m, uid, ts, kind, path, body, dur, quote, qmine, meta)
+                    if (r == 2) any = true
+                    if (r == 0) store.gqAdd(uid, m)
+                }
+            }
+        }
+        val state = if (any) 1 else 0
+        val id = store.insertOut(gid, uid, body, ts, state, quote, qmine, kind, path, dur)
+        return Msg(id, uid, true, body, ts, state, "", false, quote, qmine, kind, path, dur)
     }
 
     // when we meet again: send what was waiting, and the "read" receipts that were waiting
@@ -445,6 +593,13 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
             if (m.kind == "t") send(ep, msgJson(m.uid, m.ts, m.body, m.quote, m.qmine))
             else sendMediaOut(ep, m.uid, m.ts, m.kind, m.path, m.body, m.dur, m.quote, m.qmine)
             store.setState(m.uid, 1)
+        }
+        for (p in store.gqFor(h)) {
+            val m = store.msgByUid(p.first) ?: continue
+            val meta = groupMeta(store.group(p.second))
+            if (m.kind == "t") send(ep, msgJson(m.uid, m.ts, m.body, m.quote, m.qmine, meta))
+            else sendMediaOut(ep, m.uid, m.ts, m.kind, m.path, m.body, m.dur, m.quote, m.qmine, meta)
+            store.gqDone(p.first, h)
         }
         val reads = store.unackedReads(h)
         if (reads.isNotEmpty()) {
@@ -480,13 +635,15 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
             // tell the sender it arrived
             send(ep, JSONObject().put("t", "d").put("id", uid))
             if (store.hasUid(uid)) return
-            val viewing = foreground && activeChat == h
+            val peer = peerFor(h, j)
+            val viewing = foreground && activeChat == peer
             val quote = j.optString("q")
             val qm = j.optInt("qw", 0) == 0
-            val rowId = store.insertIn(h, uid, body, ts, !viewing, quote, qm)
+            val rowId = store.insertIn(peer, uid, body, ts, !viewing, quote, qm)
+            if (peer != h) store.setSender(uid, h)
             store.touchSeen(h)
             if (viewing) sendReadAck(ep, listOf(uid))
-            ui.onIncoming(h, Msg(rowId, uid, false, body, ts, 0, "", false, quote, qm))
+            ui.onIncoming(peer, Msg(rowId, uid, false, body, ts, 0, "", false, quote, qm, "t", "", 0, if (peer != h) h else ""))
         } else if (type == "p") {
             store.setAbout(h, j.optString("about"))
             val key = j.optString("k")
@@ -571,26 +728,32 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
                 if (have.contains(u)) continue
                 val e = store.relayGet(u) ?: continue
                 if (e.hops >= Relay.MAX_HOPS && e.dst != h) continue
-                send(ep, relayJson(e.uid, e.dst, e.ts, e.hops + 1, e.blob))
+                sendEnvelope(ep, e.uid, e.dst, e.ts, e.hops + 1, e.blob)
                 store.setState(e.uid, 1)
             }
             ui.onChanged()
         } else if (type == "re") {
+            acceptEnvelope(h, ep, j.optString("id"), j.optString("dst"), j.optLong("ts", 0L), j.optInt("hp", 1), j.optString("b"))
+        } else if (type == "rc") {
             val uid = j.optString("id")
-            val dst = j.optString("dst")
-            val blob = j.optString("b")
-            val ts = j.optLong("ts", 0L)
-            val hops = j.optInt("hp", 1)
-            if (uid.isEmpty() || dst.isEmpty() || blob.isEmpty() || blob.length > Relay.MAX_BLOB) return
-            if (ts + Relay.TTL_MS < System.currentTimeMillis()) return
-            if (store.hasUid(uid)) {
-                if (dst == myHash) send(ep, JSONObject().put("t", "ra").put("id", uid))
+            val i = j.optInt("i")
+            val n = j.optInt("n")
+            if (uid.isEmpty() || n !in 2..80 || i !in 0 until n) return
+            if (store.hasUid(uid) || store.hasRelay(uid)) {
+                if (j.optString("dst") == myHash && store.hasUid(uid)) send(ep, JSONObject().put("t", "ra").put("id", uid))
                 return
             }
-            if (store.hasRelay(uid)) return
-            if (dst == myHash) deliverRelayed(ep, uid, blob)
-            else if (hops <= Relay.MAX_HOPS) store.putRelay(uid, dst, ts, hops, blob)
-            ui.onChanged()
+            var buf = relayParts[uid]
+            if (buf == null || buf.size != n) {
+                if (relayParts.size > 6) relayParts.clear()
+                buf = arrayOfNulls<String>(n)
+                relayParts[uid] = buf
+            }
+            buf[i] = j.optString("d")
+            if (buf.all { it != null }) {
+                relayParts.remove(uid)
+                acceptEnvelope(h, ep, uid, j.optString("dst"), j.optLong("ts", 0L), j.optInt("hp", 1), buf.joinToString(""))
+            }
         } else if (type == "ra") {
             applyDone(j.optString("id"))
             ui.onChanged()
@@ -722,6 +885,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
 
         override fun onDisconnected(endpointId: String) {
             val h = connected.remove(endpointId)
+            relayParts.clear()
             nearby.remove(endpointId)
             if (h != null) {
                 store.touchSeen(h)
