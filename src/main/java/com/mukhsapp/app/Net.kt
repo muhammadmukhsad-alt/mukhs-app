@@ -244,6 +244,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
             state = 1
         }
         val id = store.insertOut(h, uid, name, ts, state, quote, qmine, kind, path, dur)
+        if (state == 0) Mailbox.kick()
         return Msg(id, uid, true, name, ts, state, "", false, quote, qmine, kind, path, dur)
     }
 
@@ -395,6 +396,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
             state = 1
         }
         val id = store.insertOut(h, uid, text, ts, state, quote, qmine)
+        if (state == 0) Mailbox.kick()
         return Msg(id, uid, true, text, ts, state, "", false, quote, qmine)
     }
 
@@ -493,15 +495,15 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
     }
 
     // an envelope for me: open it, check who signed it, save it as a normal message
-    private fun deliverRelayed(ep: String, uid: String, blob: String) {
-        val o = Relay.open(ctx, uid, myHash, blob) ?: return
+    private fun deliverRelayed(ep: String?, uid: String, blob: String): String? {
+        val o = Relay.open(ctx, uid, myHash, blob) ?: return null
         val src = o.src
-        if (src.length != 12 || src == myHash || !src.all { it in '0'..'9' || it in 'a'..'f' }) return
+        if (src.length != 12 || src == myHash || !src.all { it in '0'..'9' || it in 'a'..'f' }) return null
         val known = store.pub(src)
-        if (known.isNotEmpty() && known != o.senderPub) return
+        if (known.isNotEmpty() && known != o.senderPub) return null
         val inner = o.inner
         val kind = inner.optString("k", "t")
-        if (kind != "t" && kind != "a" && kind != "i" && kind != "d") return
+        if (kind != "t" && kind != "a" && kind != "i" && kind != "d") return null
         store.savePeer(src, nameOf(src))
         if (known.isEmpty()) store.setPub(src, o.senderPub)
         val peer = peerFor(src, inner)
@@ -518,20 +520,69 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
             val name = inner.optString("n")
             val dur = inner.optInt("dur")
             val data = inner.optString("d")
-            if (data.isEmpty()) return
+            if (data.isEmpty()) return null
             val f = File(Media.dir(ctx), "in_" + uid + "." + mediaExt(kind, name))
             try {
                 f.writeBytes(Base64.decode(data, Base64.NO_WRAP))
             } catch (e: Exception) {
-                return
+                return null
             }
             rowId = store.insertIn(peer, uid, name, o.ts, !viewing, quote, qm, kind, f.path, dur)
             msg = Msg(rowId, uid, false, name, o.ts, 0, "", false, quote, qm, kind, f.path, dur, if (peer != src) src else "")
         }
         if (peer != src) store.setSender(uid, src)
         store.relayDone(uid, o.ts)
-        send(ep, JSONObject().put("t", "ra").put("id", uid))
+        if (ep != null) send(ep, JSONObject().put("t", "ra").put("id", uid))
         ui.onIncoming(peer, msg)
+        return src
+    }
+
+    // ---------- mailbox (GitHub) ----------
+
+    // seal a message for one person (and for a group if gid is given); null = no key yet or file too big
+    fun sealFor(h: String, m: Msg, gid: String?): String? {
+        val pub = store.pub(h)
+        if (pub.isEmpty()) return null
+        val inner = JSONObject()
+        if (m.kind == "t") {
+            inner.put("k", "t").put("b", m.body)
+        } else {
+            val f = File(m.path)
+            if (!f.exists() || f.length() > Relay.MAX_FILE) return null
+            inner.put("k", m.kind).put("n", m.body).put("dur", m.dur)
+                .put("d", Base64.encodeToString(f.readBytes(), Base64.NO_WRAP))
+        }
+        if (m.quote.isNotEmpty()) inner.put("q", m.quote).put("qw", if (m.qmine) 1 else 0)
+        if (gid != null) mergeInto(inner, groupMeta(store.group(gid)))
+        return Relay.seal(ctx, pub, h, myHash, m.uid, m.ts, inner)
+    }
+
+    // the mailbox took my message: one tick
+    fun mailboxSent(uid: String) {
+        handler.post {
+            store.setState(uid, 1)
+            ui.onChanged()
+        }
+    }
+
+    // the receiver's phone has saved it: two ticks
+    fun mailboxDelivered(uid: String) {
+        handler.post {
+            applyDone(uid)
+            ui.onChanged()
+        }
+    }
+
+    // a message found in my box: save it; done() gets who sent it (or null)
+    fun deliverFromMailbox(uid: String, dst: String, ts: Long, blob: String, done: (String?) -> Unit) {
+        handler.post {
+            var src: String? = null
+            if (dst == myHash && !store.hasUid(uid) && blob.isNotEmpty() && blob.length <= Relay.MAX_BLOB) {
+                src = deliverRelayed(null, uid, blob)
+            }
+            ui.onChanged()
+            done(src)
+        }
     }
 
     // ---------- groups and broadcast lists ----------
@@ -577,12 +628,13 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
                     val r = if (kind == "t") relayOut(m, uid, ts, body, quote, qmine, meta)
                     else relayOutMedia(m, uid, ts, kind, path, body, dur, quote, qmine, meta)
                     if (r == 2) any = true
-                    if (r == 0) store.gqAdd(uid, m)
+                    if (r != 2) store.gqAdd(uid, m)
                 }
             }
         }
         val state = if (any) 1 else 0
         val id = store.insertOut(gid, uid, body, ts, state, quote, qmine, kind, path, dur)
+        Mailbox.kick()
         return Msg(id, uid, true, body, ts, state, "", false, quote, qmine, kind, path, dur)
     }
 

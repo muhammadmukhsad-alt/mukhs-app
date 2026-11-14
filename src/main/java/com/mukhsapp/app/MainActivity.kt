@@ -3045,6 +3045,7 @@ class MainActivity : Activity(), NetListener {
         if (q.isEmpty()) {
             box.addView(actionRow(R.drawable.ic_people, L.s("Sabon group", "New group")) { showNewGroup("g") })
             box.addView(actionRow(R.drawable.ic_nearby, L.s("Sabon broadcast", "New broadcast list")) { showNewGroup("b") })
+            box.addView(actionRow(R.drawable.ic_call, L.s("Aika wa lamba", "Message a number")) { messageNumber() })
             box.addView(actionRow(R.drawable.ic_person, L.s("Sabon contact", "New contact")) {
                 try {
                     startActivity(Intent(Intent.ACTION_INSERT, ContactsContract.Contacts.CONTENT_URI))
@@ -3115,6 +3116,30 @@ class MainActivity : Activity(), NetListener {
     }
 
     // ---------- groups and broadcast lists ----------
+
+    // write to any phone number (it only needs to be on MukhsApp; the mailbox finds its key)
+    private fun messageNumber() {
+        val et = styledInput(L.s("Lambar waya (08031234567)", "Phone number (08031234567)"), InputType.TYPE_CLASS_PHONE)
+        dlg()
+            .setTitle(L.s("Aika wa lamba", "Message a number"))
+            .setView(et)
+            .setPositiveButton("OK") { _, _ ->
+                val n = Num.normalize(et.text.toString())
+                if (n == null) {
+                    toast(L.s("Lamba ba daidai ba.", "Enter a valid number."))
+                } else {
+                    val h = Num.hashOf(n)
+                    if (h == net.myHash) {
+                        toast(L.s("Wannan lambarka ne.", "That is your own number."))
+                    } else {
+                        if (store.peerName(h) == "Friend") store.savePeer(h, "+" + n)
+                        showChat(h)
+                    }
+                }
+            }
+            .setNegativeButton(L.s("Soke", "Cancel"), null)
+            .show()
+    }
 
     private fun senderPrefix(cv: Convo): String =
         if (Groups.isGroupId(cv.peer) && !cv.last.mine && cv.last.sender.isNotEmpty()) net.nameOf(cv.last.sender) + ": " else ""

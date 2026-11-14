@@ -419,6 +419,29 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 9) {
         return out
     }
 
+    fun gqAll(): List<Triple<String, String, String>> {
+        val out = ArrayList<Triple<String, String, String>>()
+        val c = readableDatabase.rawQuery(
+            "SELECT g.uid, g.member, m.peer FROM gq g JOIN msgs m ON m.uid = g.uid", null
+        )
+        while (c.moveToNext()) out.add(Triple(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: ""))
+        c.close()
+        return out
+    }
+
+    // messages to one person that nobody has taken yet (to the mailbox): (person, message)
+    fun pendingNet(): List<Pair<String, Msg>> {
+        val out = ArrayList<Pair<String, Msg>>()
+        val c = readableDatabase.rawQuery(
+            "SELECT $COLS, peer FROM msgs WHERE mine=1 AND state=0 AND del=0 AND uid IS NOT NULL " +
+                "AND substr(peer, 2, 1) <> '_' AND kind IN ('t','a','i','d') ORDER BY id LIMIT 60",
+            null
+        )
+        while (c.moveToNext()) out.add(Pair(c.getString(14) ?: "", readMsg(c)))
+        c.close()
+        return out
+    }
+
     fun gqDone(uid: String, member: String) {
         writableDatabase.execSQL("DELETE FROM gq WHERE uid=? AND member=?", arrayOf<Any?>(uid, member))
     }

@@ -21,6 +21,9 @@ jobs:
         with:
           gradle-version: 8.9
       - name: Build debug APK
+        env:
+          MAILBOX_REPO: ${{ secrets.MAILBOX_REPO }}
+          MAILBOX_TOKEN: ${{ secrets.MAILBOX_TOKEN }}
         run: gradle assembleDebug --no-daemon
       - name: Name the APK
         run: cp build/outputs/apk/debug/*.apk MukhsApp.apk
