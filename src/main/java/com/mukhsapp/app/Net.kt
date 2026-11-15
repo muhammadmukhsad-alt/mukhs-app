@@ -478,7 +478,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
     private val lastCarrier = HashMap<String, Long>()
 
     private fun carrierFound(endpointId: String, h: String) {
-        if (!autoOn) return
+        if (!autoOn || !Features.MESH) return
         val last = lastCarrier[h]
         if (last != null && System.currentTimeMillis() - last < 600000L) return
         lastCarrier[h] = System.currentTimeMillis()
@@ -492,6 +492,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
 
     // my own key and the keys I know, so a phone that never met somebody can still write to them
     private fun sendKeys(ep: String) {
+        if (!Features.MESH) return
         val arr = JSONArray()
         arr.put(JSONArray().put(myHash).put(Relay.myPub(ctx)).put(myName))
         for (k in store.knownKeys(40)) {
@@ -503,7 +504,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
 
     // keys from other phones: only used for people I have no key for (a key from a direct meeting is never replaced)
     private fun takeKeys(arr: JSONArray?) {
-        if (arr == null) return
+        if (arr == null || !Features.MESH) return
         for (i in 0 until minOf(arr.length(), 60)) {
             val e = arr.optJSONArray(i) ?: continue
             val kh = e.optString(0)
@@ -547,7 +548,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
         }
         if (store.hasRelay(uid)) return
         if (dst == myHash) deliverRelayed(ep, uid, blob)
-        else if (hops <= Relay.MAX_HOPS) store.putRelay(uid, dst, ts, hops, blob)
+        else if (Features.MESH && hops <= Relay.MAX_HOPS) store.putRelay(uid, dst, ts, hops, blob)
         ui.onChanged()
     }
 
@@ -796,6 +797,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
                 if (have.contains(u)) continue
                 val e = store.relayGet(u) ?: continue
                 if (e.hops >= Relay.MAX_HOPS && e.dst != h) continue
+                if (!Features.MESH && e.dst != h) continue
                 sendEnvelope(ep, e.uid, e.dst, e.ts, e.hops + 1, e.blob)
                 store.setState(e.uid, 1)
             }

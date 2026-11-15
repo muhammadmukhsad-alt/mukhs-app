@@ -32,3 +32,8 @@ On-device NSFW classifier before upload and before showing; signed reports; loca
 
 ## Phase 5 - Multi-hop live calls
 Relay audio frames across connected neighbours (mesh), jitter buffer, optional external radio bridge.
+
+## Current focus (v0.23): walkie-talkie core
+Chat, voice notes and voice calls, phone to phone, no internet, no carrying for strangers (`Features.MESH = false`).
+Video calls hidden (`Features.VIDEO = false`). Feed / Reels not started.
+Long range (5-10 km) needs a radio attached to the phone (LoRa / VHF-UHF); the transport layer is where it plugs in next.

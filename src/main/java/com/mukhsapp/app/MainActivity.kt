@@ -438,7 +438,8 @@ class MainActivity : Activity(), NetListener {
         }
     }
 
-    private fun startCall(h: String, vid: Boolean) {
+    private fun startCall(h: String, vid0: Boolean) {
+        val vid = vid0 && Features.VIDEO
         if (Calls.state != Calls.IDLE) {
             showCall()
             return
@@ -1945,10 +1946,12 @@ class MainActivity : Activity(), NetListener {
             d.dismiss()
             startCall(h, false)
         }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        actions.addView(icon(R.drawable.ic_videocam, 24, C.ACCENT) {
-            d.dismiss()
-            startCall(h, true)
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        if (Features.VIDEO) {
+            actions.addView(icon(R.drawable.ic_videocam, 24, C.ACCENT) {
+                d.dismiss()
+                startCall(h, true)
+            }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        }
         actions.addView(icon(R.drawable.ic_info, 24, C.ACCENT) {
             d.dismiss()
             viewContact(h)
@@ -3719,7 +3722,7 @@ class MainActivity : Activity(), NetListener {
         titleBox.addView(st)
         header.addView(titleBox, LinearLayout.LayoutParams(0, WRAP, 1f))
         if (!Groups.isId(h)) {
-            header.addView(icon(R.drawable.ic_videocam, 24, C.BAR_ICON) { startCall(h, true) })
+            if (Features.VIDEO) header.addView(icon(R.drawable.ic_videocam, 24, C.BAR_ICON) { startCall(h, true) })
             header.addView(icon(R.drawable.ic_call, 24, C.BAR_ICON) { startCall(h, false) })
         }
         header.addView(icon(R.drawable.ic_more_vert, 24, C.BAR_ICON) { v -> chatMenu(v, h) })

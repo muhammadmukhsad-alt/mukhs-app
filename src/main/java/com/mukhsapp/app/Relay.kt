@@ -162,3 +162,11 @@ object Groups {
     fun isBroadcastId(h: String): Boolean = h.startsWith("b_")
     fun newId(kind: String): String = kind + "_" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12)
 }
+
+// switches for the current build
+object Features {
+    // video calls are parked until chat, voice notes and voice calls are fully tested
+    const val VIDEO = false
+    // carrying envelopes for other people / strangers: off. Messages go phone to phone, like a walkie-talkie.
+    const val MESH = false
+}
