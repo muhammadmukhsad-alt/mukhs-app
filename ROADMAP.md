@@ -14,7 +14,8 @@ Phones talk to each other with Google Nearby Connections (Bluetooth + Wi-Fi Dire
 - [x] Delivery tombstones so carriers drop delivered messages; sender gets the double tick
 - [x] Text via relay (needs the receiver's public key, learned at the first direct meeting)
 - [x] Voice notes, photos and small files via relay (chunked envelopes, up to 700 KB)
-- [ ] Connect to non-contacts as carriers (today only phone contacts are discovered)
+- [x] Any MukhsApp phone can carry envelopes (non-contacts are used only for envelopes + keys, never shown as people)
+- [x] Key gossip: phones share the public keys they know, so you can write to a contact you never met
 - [ ] Username addressing (directory gossiped with public keys)
 - [ ] "last seen" shown from relay activity; badges already exist
 

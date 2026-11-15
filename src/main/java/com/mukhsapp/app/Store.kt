@@ -437,6 +437,19 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "mukhs.db", null, 9) {
         return p
     }
 
+    // people whose public key I know, newest first: (hash, key, name). Shared with phones I meet.
+    class KeyRow(val hash: String, val pub: String, val name: String)
+
+    fun knownKeys(limit: Int): List<KeyRow> {
+        val out = ArrayList<KeyRow>()
+        val c = readableDatabase.rawQuery(
+            "SELECT hash, pub, name FROM peers WHERE pub <> '' ORDER BY last_seen DESC LIMIT " + limit, null
+        )
+        while (c.moveToNext()) out.add(KeyRow(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: ""))
+        c.close()
+        return out
+    }
+
     fun hasRelay(uid: String): Boolean {
         val c = readableDatabase.rawQuery("SELECT 1 FROM relay WHERE uid=? LIMIT 1", arrayOf(uid))
         val r = c.moveToFirst()

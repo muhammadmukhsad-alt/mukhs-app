@@ -429,7 +429,9 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
         val blob = Relay.seal(ctx, pub, h, myHash, uid, ts, inner) ?: return 0
         store.putRelay(uid, h, ts, 0, blob)
         var handed = false
-        for (cep in connected.keys) {
+        val eps = ArrayList<String>(connected.keys)
+        eps.addAll(carrierEp.keys)
+        for (cep in eps) {
             sendEnvelope(cep, uid, h, ts, 1, blob)
             handed = true
         }
@@ -468,6 +470,69 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
         if (uid.isEmpty()) return
         store.relayDone(uid, System.currentTimeMillis())
         store.setState(uid, 2)
+    }
+
+    // Phones that are not in my contacts are still useful: they carry sealed envelopes for everybody.
+    // I talk to them only about envelopes and public keys, they never show up as people nearby.
+    private val carrierEp = HashMap<String, String>()
+    private val lastCarrier = HashMap<String, Long>()
+
+    private fun carrierFound(endpointId: String, h: String) {
+        if (!autoOn) return
+        val last = lastCarrier[h]
+        if (last != null && System.currentTimeMillis() - last < 600000L) return
+        lastCarrier[h] = System.currentTimeMillis()
+        val wait = if (myHash < h) 600L else 6000L
+        handler.postDelayed({
+            if (!connected.containsValue(h) && !carrierEp.containsValue(h) && pendingConn.values.none { it.first == h }) {
+                client.requestConnection(advName(), endpointId, connCallback)
+            }
+        }, wait)
+    }
+
+    // my own key and the keys I know, so a phone that never met somebody can still write to them
+    private fun sendKeys(ep: String) {
+        val arr = JSONArray()
+        arr.put(JSONArray().put(myHash).put(Relay.myPub(ctx)).put(myName))
+        for (k in store.knownKeys(40)) {
+            if (k.hash == myHash) continue
+            arr.put(JSONArray().put(k.hash).put(k.pub).put(k.name))
+        }
+        send(ep, JSONObject().put("t", "kg").put("k", arr))
+    }
+
+    // keys from other phones: only used for people I have no key for (a key from a direct meeting is never replaced)
+    private fun takeKeys(arr: JSONArray?) {
+        if (arr == null) return
+        for (i in 0 until minOf(arr.length(), 60)) {
+            val e = arr.optJSONArray(i) ?: continue
+            val kh = e.optString(0)
+            val kp = e.optString(1)
+            if (kh.length != 12 || kh == myHash || kp.length !in 80..400) continue
+            if (!kh.all { it in '0'..'9' || it in 'a'..'f' }) continue
+            if (store.pub(kh).isNotEmpty()) continue
+            if (store.peerName(kh) == "Friend") store.savePeer(kh, e.optString(2).take(40))
+            store.setPub(kh, kp)
+            sealWaiting(kh)
+        }
+    }
+
+    // I just learned somebody's key: everything that was waiting for them can now travel
+    private fun sealWaiting(h: String) {
+        for (m in store.pendingOut(h)) {
+            if (store.hasRelay(m.uid)) continue
+            val r = if (m.kind == "t") relayOut(h, m.uid, m.ts, m.body, m.quote, m.qmine, null)
+            else relayOutMedia(h, m.uid, m.ts, m.kind, m.path, m.body, m.dur, m.quote, m.qmine, null)
+            if (r == 2) store.setState(m.uid, 1)
+        }
+        for (p in store.gqFor(h)) {
+            val m = store.msgByUid(p.first) ?: continue
+            if (store.hasRelay(m.uid)) continue
+            val meta = groupMeta(store.group(p.second))
+            val r = if (m.kind == "t") relayOut(h, m.uid, m.ts, m.body, m.quote, m.qmine, meta)
+            else relayOutMedia(h, m.uid, m.ts, m.kind, m.path, m.body, m.dur, m.quote, m.qmine, meta)
+            if (r != 0) store.gqDone(p.first, h)
+        }
     }
 
     // pieces of a big envelope that are still arriving: id -> pieces
@@ -718,6 +783,9 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
         } else if (type == "x") {
             store.setReact(j.optString("id"), j.optString("e"))
             ui.onChanged()
+        } else if (type == "kg") {
+            takeKeys(j.optJSONArray("k"))
+            ui.onChanged()
         } else if (type == "rh") {
             val dn = j.optJSONArray("done")
             if (dn != null) for (i in 0 until dn.length()) applyDone(dn.optString(i))
@@ -773,9 +841,20 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
 
     private val payloadCallback = object : PayloadCallback() {
         override fun onPayloadReceived(endpointId: String, payload: Payload) {
-            val h = connected[endpointId] ?: pendingConn[endpointId]?.first ?: return
+            val h = connected[endpointId] ?: carrierEp[endpointId] ?: pendingConn[endpointId]?.first ?: return
             if (payload.type != Payload.Type.BYTES) return
             val bytes = payload.asBytes() ?: return
+            if (carrierEp.containsKey(endpointId)) {
+                // a phone that is not in my contacts: only envelopes and keys are accepted
+                try {
+                    val cj = JSONObject(String(bytes, Charsets.UTF_8))
+                    val ct = cj.optString("t")
+                    if (ct == "rh" || ct == "re" || ct == "rc" || ct == "ra" || ct == "kg") handle(h, endpointId, cj)
+                } catch (e: Exception) {
+                    // ignore
+                }
+                return
+            }
             // call sound and video frames start with a small number, messages start with {
             if (bytes.size > 1 && bytes[0].toInt() in 1..9) {
                 Calls.onFrame(h, bytes)
@@ -804,8 +883,11 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
             val p = parseAdv(info.endpointName) ?: return
             val h = p.first
             if (h == myHash) return
-            // Only people whose number is in MY contacts are shown.
-            if (!contacts.containsKey(h)) return
+            // Only people whose number is in MY contacts are shown. Everybody else may carry envelopes.
+            if (!contacts.containsKey(h)) {
+                carrierFound(endpointId, h)
+                return
+            }
             nearby[endpointId] = h
             store.savePeer(h, p.second)
             store.touchSeen(h)
@@ -853,13 +935,23 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
 
         override fun onConnectionResult(endpointId: String, result: ConnectionResolution) {
             val p = pendingConn.remove(endpointId)
-            if (result.status.isSuccess && p != null) {
+            if (result.status.isSuccess && p != null && !contacts.containsKey(p.first)) {
+                // carrier: swap envelopes and keys for a short while, then let go
+                carrierEp[endpointId] = p.first
+                lastCarrier[p.first] = System.currentTimeMillis()
+                sendRelayHello(endpointId)
+                sendKeys(endpointId)
+                handler.postDelayed({
+                    if (carrierEp.containsKey(endpointId)) client.disconnectFromEndpoint(endpointId)
+                }, 40000L)
+            } else if (result.status.isSuccess && p != null) {
                 val h = p.first
                 connected[endpointId] = h
                 store.savePeer(h, p.second)
                 store.touchSeen(h)
                 flush(h)
                 sendRelayHello(endpointId)
+                sendKeys(endpointId)
                 sendProfile(endpointId)
                 announceStatuses(endpointId)
                 for (u in store.unsentViews(h)) sendStatusView(h, u)
@@ -885,6 +977,7 @@ class Net(private val ctx: Context, private val store: Store, var ui: NetListene
 
         override fun onDisconnected(endpointId: String) {
             val h = connected.remove(endpointId)
+            carrierEp.remove(endpointId)
             relayParts.clear()
             nearby.remove(endpointId)
             if (h != null) {
